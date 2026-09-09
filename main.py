@@ -11,33 +11,15 @@ app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "M15 Synchronized Gold Bot is Live!"
+    return "5-Min Alert M15 Gold Bot is Live!"
 
 def run_web_server():
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
 
+# متغيرات متابعة حالة الصفقة
 active_order = None
-
-# دالة الانتظار حتى الإغلاق الفعلي لشمعة M15
-async def wait_for_m15_candle_close():
-    while True:
-        now = datetime.utcnow()
-        # فحص إغلاق شمعة 15 دقيقة (عند الدقيقة 00، 15، 30، 45)
-        if now.minute % 15 == 0 and now.second < 10:
-            break
-        await asyncio.sleep(5)
-
-def calculate_atr(highs, lows, closes, window=14):
-    tr_list = []
-    for i in range(1, len(closes)):
-        tr = max(
-            highs[i] - lows[i],
-            abs(highs[i] - closes[i-1]),
-            abs(lows[i] - closes[i-1])
-        )
-        tr_list.append(tr)
-    return sum(tr_list[-window:]) / window if len(tr_list) >= window else 4.0
+order_status = None  # يمكن أن تكون: "PENDING" أو "TRIGGERED"
 
 def calculate_rsi(closes, window=14):
     gains, losses = [], []
@@ -63,13 +45,13 @@ def calculate_ema(data, window):
         ema.append((price * weights[0]) + (ema[-1] * (1 - weights[0])))
     return ema
 
-def get_institutional_gold_signal():
-    global active_order
+def analyze_gold_market():
+    global active_order, order_status
     api_key = os.environ.get("TWELVE_DATA_API_KEY")
     
     if not api_key:
         print("Error: TWELVE_DATA_API_KEY missing!")
-        return None, 0, 0, 0, 0
+        return None, "NO_KEY", 0, 0, 0
 
     try:
         url_spot = f"https://api.twelvedata.com/time_series?symbol=XAU/USD&interval=15min&outputsize=40&apikey={api_key}"
@@ -80,7 +62,7 @@ def get_institutional_gold_signal():
 
         if "values" not in res_spot:
             print("Twelve Data Error or limit reached.")
-            return None, 0, 0, 0, 0
+            return None, "API_ERROR", 0, 0, 0
 
         spot_values = res_spot["values"]
         spot_values.reverse()
@@ -109,32 +91,51 @@ def get_institutional_gold_signal():
         volume_avg = sum(futures_volumes[-5:-1]) / 4 if len(futures_volumes) >= 5 else volume_current
         volume_surging = volume_current > volume_avg
 
+        # المؤشرات محسوبة على شمعة M15
         ema20 = calculate_ema(spot_closes, 20)[-1]
         ema50 = calculate_ema(spot_closes, 50)[-1]
         rsi = calculate_rsi(spot_closes, 14)
-        atr = calculate_atr(spot_highs, spot_lows, spot_closes, 14)
 
-        recent_high = max(spot_highs[-4:-1])
-        recent_low = min(spot_lows[-4:-1])
+        structural_swing_high = max(spot_highs[-5:-1])
+        structural_swing_low = min(spot_lows[-5:-1])
 
-        # إدارة الصفقة الحالية
+        # -------------------------------------------------------------
+        # 1. متابعة وإدارة الصفقة القائمة حالياً
+        # -------------------------------------------------------------
         if active_order is not None:
-            if active_order['type'] == 'Buy Stop' and spot_price >= active_order['tp']:
-                active_order = None
-            elif active_order['type'] == 'Sell Stop' and spot_price <= active_order['tp']:
-                active_order = None
-            elif active_order['type'] == 'Buy Stop' and spot_price <= active_order['sl']:
-                active_order = None
-            elif active_order['type'] == 'Sell Stop' and spot_price >= active_order['sl']:
-                active_order = None
-            
-            return active_order, spot_price, basis_current, rsi, atr
+            # فحص تفعيل الصفقة المعلقة
+            if order_status == "PENDING":
+                if active_order['type'] == 'Buy Stop' and spot_price >= active_order['entry']:
+                    order_status = "TRIGGERED"
+                    return active_order, "JUST_TRIGGERED", spot_price, basis_current, rsi
+                elif active_order['type'] == 'Sell Stop' and spot_price <= active_order['entry']:
+                    order_status = "TRIGGERED"
+                    return active_order, "JUST_TRIGGERED", spot_price, basis_current, rsi
 
-        # شرط Buy Stop على إغلاق M15
+            # فحص إغلاق الصفقة (ضرب الهدف أو الستوب)
+            if active_order['type'] == 'Buy Stop':
+                if spot_price >= active_order['tp'] or spot_price <= active_order['sl']:
+                    active_order = None
+                    order_status = None
+                    return None, "CLOSED", spot_price, basis_current, rsi
+            elif active_order['type'] == 'Sell Stop':
+                if spot_price <= active_order['tp'] or spot_price >= active_order['sl']:
+                    active_order = None
+                    order_status = None
+                    return None, "CLOSED", spot_price, basis_current, rsi
+
+            # الصفقة ما زالت قائمة ولم تتفعل أو ما زالت مفعلة وقيد التنفيذ
+            status_event = "STILL_TRIGGERED" if order_status == "TRIGGERED" else "STILL_PENDING"
+            return active_order, status_event, spot_price, basis_current, rsi
+
+        # -------------------------------------------------------------
+        # 2. إنشاء صفقة جديدة بناءً على إغلاق M15
+        # -------------------------------------------------------------
         if ema20 > ema50 and rsi < 68 and (basis_expansion >= 0.10 or volume_surging):
-            proposed_entry = round(max(recent_high, spot_price) + 1.20, 2)
-            sl_price = round(proposed_entry - max(4.5, atr * 1.2), 2)
-            tp_price = round(proposed_entry + ((proposed_entry - sl_price) * 1.8), 2)
+            proposed_entry = round(max(structural_swing_high, spot_price) + 1.20, 2)
+            sl_price = round(structural_swing_low - 0.50, 2)
+            risk_distance = proposed_entry - sl_price
+            tp_price = round(proposed_entry + (risk_distance * 1.5), 2)
 
             active_order = {
                 "type": "Buy Stop",
@@ -142,14 +143,16 @@ def get_institutional_gold_signal():
                 "tp": tp_price,
                 "sl": sl_price,
                 "rsi": rsi,
-                "reason": "تأكيد إغلاق شمعة M15 مع تدفق سيولة شرائية"
+                "reason": "تأكيد هيكل M15 - اتجاه صاعد مع تدفق سيولة"
             }
+            order_status = "PENDING"
+            return active_order, "NEW_ORDER", spot_price, basis_current, rsi
 
-        # شرط Sell Stop على إغلاق M15
         elif ema20 < ema50 and rsi > 32 and (basis_expansion <= -0.10 or volume_surging):
-            proposed_entry = round(min(recent_low, spot_price) - 1.20, 2)
-            sl_price = round(proposed_entry + max(4.5, atr * 1.2), 2)
-            tp_price = round(proposed_entry - ((sl_price - proposed_entry) * 1.8), 2)
+            proposed_entry = round(min(structural_swing_low, spot_price) - 1.20, 2)
+            sl_price = round(structural_swing_high + 0.50, 2)
+            risk_distance = sl_price - proposed_entry
+            tp_price = round(proposed_entry - (risk_distance * 1.5), 2)
 
             active_order = {
                 "type": "Sell Stop",
@@ -157,14 +160,16 @@ def get_institutional_gold_signal():
                 "tp": tp_price,
                 "sl": sl_price,
                 "rsi": rsi,
-                "reason": "تأكيد إغلاق شمعة M15 مع ضغوط بيعية مؤسسية"
+                "reason": "تأكيد هيكل M15 - اتجاه هابط مع ضغوط بيعية"
             }
+            order_status = "PENDING"
+            return active_order, "NEW_ORDER", spot_price, basis_current, rsi
 
-        return active_order, spot_price, basis_current, rsi, atr
+        return None, "NO_SIGNAL", spot_price, basis_current, rsi
 
     except Exception as e:
         print(f"Execution Error: {e}")
-        return None, 0, 0, 0, 0
+        return None, "ERROR", 0, 0, 0
 
 async def main_loop():
     token = os.environ.get("TELEGRAM_TOKEN")
@@ -177,37 +182,69 @@ async def main_loop():
     bot = Bot(token=token)
 
     while True:
-        # المزامنة مع نهاية شمعة M15
-        await wait_for_m15_candle_close()
-        
-        order, spot_price, basis, rsi, atr = get_institutional_gold_signal()
+        order, event, spot_price, basis, rsi = analyze_gold_market()
         
         if order:
             emoji = "🟢" if order['type'] == "Buy Stop" else "🔴"
-            msg = (
-                f"🚨 **إشارة مؤكدة (M15 Candle Close)**\n"
-                f"⏱ **التوقيت:** إغلاق شمعة 15 دقيقة | **الرمز:** XAUUSD\n\n"
-                f"📊 **سعر المنصة المباشر:** {spot_price}\n"
-                f"📏 **مؤشر ATR:** {round(atr, 2)}\n"
-                f"📐 **فارق الآجل/الفوري:** {basis}\n"
-                f"📈 **مؤشر RSI:** {rsi}\n\n"
-                f"{emoji} **نوع الأمر المعلق:** {order['type']}\n"
-                f"🎯 **سعر الدخول (Entry):** {order['entry']}\n"
-                f"🟢 **الهدف (TP):** {order['tp']}\n"
-                f"🔴 **وقف الخسارة (SL):** {order['sl']}\n\n"
-                f"📌 *توصية صادرة فور إغلاق الشمعة.*"
-            )
+            
+            # 1. إشارة جديدة أو تذكير بإشارة معلقة (كل 5 دقائق)
+            if event in ["NEW_ORDER", "STILL_PENDING"]:
+                msg_header = "🚨 **إشارة تداول جديدة (تحليل M15)**" if event == "NEW_ORDER" else "⏳ **تحديث التنبيه (الصفقة ما زالت معلقة ولم تتفعل)**"
+                
+                msg = (
+                    f"{msg_header}\n"
+                    f"⏱ **الفحص:** كل 5 دقائق | **الاعتماد:** شمعة M15\n\n"
+                    f"📊 **سعر المنصة المباشر:** `{spot_price}`\n"
+                    f"📐 **فارق الآجل/الفوري:** `{basis}`\n"
+                    f"📈 **مؤشر RSI:** `{rsi}`\n\n"
+                    f"{emoji} **نوع الأمر المعلق:** {order['type']}\n"
+                    f"🎯 **سعر الدخول (Entry):** `{order['entry']}`\n"
+                    f"🟢 **الهدف (TP):** `{order['tp']}`\n"
+                    f"🔴 **وقف الخسارة (SL):** `{order['sl']}`\n\n"
+                    f"📌 *اضغط على أي رقم لنسخه فوراً. الصفقة قائمة بانتظار التفعيل.*"
+                )
+                try:
+                    await bot.send_message(chat_id=chat_id, text=msg, parse_mode="Markdown")
+                    print(f"[{time.strftime('%H:%M:%S')}] Alert sent ({event}).")
+                except Exception as e:
+                    print(f"Send Error: {e}")
 
-            try:
-                await bot.send_message(chat_id=chat_id, text=msg, parse_mode="Markdown")
-                print(f"[{time.strftime('%H:%M:%S')}] M15 Signal sent successfully.")
-            except Exception as e:
-                print(f"Send Error: {e}")
+            # 2. التنبيه عند تفعيل الصفقة لأول مرة
+            elif event == "JUST_TRIGGERED":
+                msg = (
+                    f"⚡️ **تم تفعيل الصفقة الآن!**\n\n"
+                    f" Symbol: **XAUUSD** | Type: **{order['type']}**\n"
+                    f"📍 **سعر التفعيل:** `{spot_price}`\n"
+                    f"🟢 **الهدف:** `{order['tp']}`\n"
+                    f"🔴 **الستوب:** `{order['sl']}`\n\n"
+                    f"⏳ *الصفقة دخلت السوق وهي قيد التنفيذ، بانتظار حسم الهدف أو الستوب لبدء صفقة جديدة.*"
+                )
+                try:
+                    await bot.send_message(chat_id=chat_id, text=msg, parse_mode="Markdown")
+                    print(f"[{time.strftime('%H:%M:%S')}] Trigger alert sent.")
+                except Exception as e:
+                    print(f"Send Error: {e}")
+
+            # 3. إشعار الاستمرار أثناء تنفيذ الصفقة
+            elif event == "STILL_TRIGGERED":
+                msg = (
+                    f"🔄 **الصفقة الحالية قيد التنفيذ**\n\n"
+                    f"📊 **السعر الحالي:** `{spot_price}`\n"
+                    f"🎯 **هدف الصفقة:** `{order['tp']}`\n"
+                    f"🔴 **وقف الخسارة:** `{order['sl']}`\n\n"
+                    f"⏳ *بانتظار إغلاق الصفقة الحالية لحساب إشارة جديدة.*"
+                )
+                try:
+                    await bot.send_message(chat_id=chat_id, text=msg, parse_mode="Markdown")
+                    print(f"[{time.strftime('%H:%M:%S')}] Ongoing execution alert sent.")
+                except Exception as e:
+                    print(f"Send Error: {e}")
+
         else:
-            print(f"[{time.strftime('%H:%M:%S')}] M15 candle closed with no signal setup.")
+            print(f"[{time.strftime('%H:%M:%S')}] Check complete - No active setup.")
 
-        # انتظار دقيقة لتفادي التكرار في نفس الشمعة
-        await asyncio.sleep(60)
+        # التكرار والدوران كل 5 دقائق (300 ثانية)
+        await asyncio.sleep(300)
 
 if __name__ == "__main__":
     Thread(target=run_web_server, daemon=True).start()
