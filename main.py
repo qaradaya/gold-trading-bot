@@ -2,6 +2,7 @@ import os
 import time
 import asyncio
 import requests
+from datetime import datetime
 from threading import Thread
 from flask import Flask
 from telegram import Bot
@@ -10,7 +11,7 @@ app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "ATR Dynamic Gold Trading Bot is Live!"
+    return "M15 Synchronized Gold Bot is Live!"
 
 def run_web_server():
     port = int(os.environ.get("PORT", 10000))
@@ -18,7 +19,15 @@ def run_web_server():
 
 active_order = None
 
-# حساب مؤشر ATR لحساب مسافات دخول وستوب ديناميكية
+# دالة الانتظار حتى الإغلاق الفعلي لشمعة M15
+async def wait_for_m15_candle_close():
+    while True:
+        now = datetime.utcnow()
+        # فحص إغلاق شمعة 15 دقيقة (عند الدقيقة 00، 15، 30، 45)
+        if now.minute % 15 == 0 and now.second < 10:
+            break
+        await asyncio.sleep(5)
+
 def calculate_atr(highs, lows, closes, window=14):
     tr_list = []
     for i in range(1, len(closes)):
@@ -28,9 +37,8 @@ def calculate_atr(highs, lows, closes, window=14):
             abs(lows[i] - closes[i-1])
         )
         tr_list.append(tr)
-    return sum(tr_list[-window:]) / window if len(tr_list) >= window else 3.5
+    return sum(tr_list[-window:]) / window if len(tr_list) >= window else 4.0
 
-# حساب RSI
 def calculate_rsi(closes, window=14):
     gains, losses = [], []
     for i in range(1, len(closes)):
@@ -48,7 +56,6 @@ def calculate_rsi(closes, window=14):
     rs = avg_gain / avg_loss
     return round(100 - (100 / (1 + rs)), 2)
 
-# حساب EMA
 def calculate_ema(data, window):
     weights = [2 / (window + 1)]
     ema = [data[0]]
@@ -61,20 +68,18 @@ def get_institutional_gold_signal():
     api_key = os.environ.get("TWELVE_DATA_API_KEY")
     
     if not api_key:
-        print("Error: TWELVE_DATA_API_KEY is missing!")
+        print("Error: TWELVE_DATA_API_KEY missing!")
         return None, 0, 0, 0, 0
 
     try:
-        # 1. جلب بيانات الذهب الفوري (Spot XAU/USD)
         url_spot = f"https://api.twelvedata.com/time_series?symbol=XAU/USD&interval=15min&outputsize=40&apikey={api_key}"
         res_spot = requests.get(url_spot).json()
 
-        # 2. جلب بيانات العقود الآجلة (Futures MGC/GC)
         url_futures = f"https://api.twelvedata.com/time_series?symbol=MGC&interval=15min&outputsize=40&apikey={api_key}"
         res_futures = requests.get(url_futures).json()
 
         if "values" not in res_spot:
-            print(f"Twelve Data Error: {res_spot.get('message', 'No Spot Data')}")
+            print("Twelve Data Error or limit reached.")
             return None, 0, 0, 0, 0
 
         spot_values = res_spot["values"]
@@ -96,7 +101,6 @@ def get_institutional_gold_signal():
         spot_price = round(spot_closes[-1], 2)
         futures_price = round(futures_closes[-1], 2)
 
-        # حساب الفارق والتذبذب
         basis_current = round(futures_price - spot_price, 2)
         basis_prev = round(futures_closes[-2] - spot_closes[-2], 2)
         basis_expansion = round(basis_current - basis_prev, 2)
@@ -110,7 +114,6 @@ def get_institutional_gold_signal():
         rsi = calculate_rsi(spot_closes, 14)
         atr = calculate_atr(spot_highs, spot_lows, spot_closes, 14)
 
-        # أعلى قمة وأقل قاع لآخر 3 شمعات
         recent_high = max(spot_highs[-4:-1])
         recent_low = min(spot_lows[-4:-1])
 
@@ -127,59 +130,40 @@ def get_institutional_gold_signal():
             
             return active_order, spot_price, basis_current, rsi, atr
 
-        # -------------------------------------------------------------
-        # الشروط الجديدة الديناميكية باستخدام ATR
-        # -------------------------------------------------------------
+        # شرط Buy Stop على إغلاق M15
+        if ema20 > ema50 and rsi < 68 and (basis_expansion >= 0.10 or volume_surging):
+            proposed_entry = round(max(recent_high, spot_price) + 1.20, 2)
+            sl_price = round(proposed_entry - max(4.5, atr * 1.2), 2)
+            tp_price = round(proposed_entry + ((proposed_entry - sl_price) * 1.8), 2)
 
-        # شرط Buy Stop الديناميكي
-        if ema20 > ema50 and rsi < 68 and (basis_expansion >= 0.15 or volume_surging):
-            # وضع الدخول فوق القمة القريبة بمسافة تنفس (0.3 * ATR)
-            proposed_entry = round(recent_high + (0.3 * atr), 2)
-            
-            # التأكد من عدم البُعد المفرط عن السعر المباشر
-            if proposed_entry <= (spot_price + (1.2 * atr)):
-                sl_price = round(recent_low - (0.5 * atr), 2)
-                risk_distance = proposed_entry - sl_price
-                
-                # إتاحة مسافة وقف خسارة لا تقل عن 4.5$
-                if risk_distance < 4.5:
-                    sl_price = round(proposed_entry - 5.0, 2)
-                    risk_distance = 5.0
+            active_order = {
+                "type": "Buy Stop",
+                "entry": proposed_entry,
+                "tp": tp_price,
+                "sl": sl_price,
+                "rsi": rsi,
+                "reason": "تأكيد إغلاق شمعة M15 مع تدفق سيولة شرائية"
+            }
 
-                active_order = {
-                    "type": "Buy Stop",
-                    "entry": proposed_entry,
-                    "tp": round(proposed_entry + (2.0 * risk_distance), 2), # R:R = 1:2
-                    "sl": sl_price,
-                    "rsi": rsi,
-                    "reason": "تدفق سيولة شرائية - مسافات معتمدة على تذبذب الذهب الحقيقي (ATR)"
-                }
+        # شرط Sell Stop على إغلاق M15
+        elif ema20 < ema50 and rsi > 32 and (basis_expansion <= -0.10 or volume_surging):
+            proposed_entry = round(min(recent_low, spot_price) - 1.20, 2)
+            sl_price = round(proposed_entry + max(4.5, atr * 1.2), 2)
+            tp_price = round(proposed_entry - ((sl_price - proposed_entry) * 1.8), 2)
 
-        # شرط Sell Stop الديناميكي
-        elif ema20 < ema50 and rsi > 32 and (basis_expansion <= -0.15 or volume_surging):
-            proposed_entry = round(recent_low - (0.3 * atr), 2)
-            
-            if proposed_entry >= (spot_price - (1.2 * atr)):
-                sl_price = round(recent_high + (0.5 * atr), 2)
-                risk_distance = sl_price - proposed_entry
-                
-                if risk_distance < 4.5:
-                    sl_price = round(proposed_entry + 5.0, 2)
-                    risk_distance = 5.0
-
-                active_order = {
-                    "type": "Sell Stop",
-                    "entry": proposed_entry,
-                    "tp": round(proposed_entry - (2.0 * risk_distance), 2), # R:R = 1:2
-                    "sl": sl_price,
-                    "rsi": rsi,
-                    "reason": "تسارع ضغوط بيعية - مسافات معتمدة على تذبذب الذهب الحقيقي (ATR)"
-                }
+            active_order = {
+                "type": "Sell Stop",
+                "entry": proposed_entry,
+                "tp": tp_price,
+                "sl": sl_price,
+                "rsi": rsi,
+                "reason": "تأكيد إغلاق شمعة M15 مع ضغوط بيعية مؤسسية"
+            }
 
         return active_order, spot_price, basis_current, rsi, atr
 
     except Exception as e:
-        print(f"ATR Logic Error: {e}")
+        print(f"Execution Error: {e}")
         return None, 0, 0, 0, 0
 
 async def main_loop():
@@ -193,33 +177,37 @@ async def main_loop():
     bot = Bot(token=token)
 
     while True:
+        # المزامنة مع نهاية شمعة M15
+        await wait_for_m15_candle_close()
+        
         order, spot_price, basis, rsi, atr = get_institutional_gold_signal()
         
         if order:
             emoji = "🟢" if order['type'] == "Buy Stop" else "🔴"
             msg = (
-                f"🚨 **إشارة تداول متوازنة (Dynamic ATR Protection)**\n"
-                f"⏱ **الفريم:** 15 دقيقة (M15) | **الرمز:** XAUUSD\n\n"
+                f"🚨 **إشارة مؤكدة (M15 Candle Close)**\n"
+                f"⏱ **التوقيت:** إغلاق شمعة 15 دقيقة | **الرمز:** XAUUSD\n\n"
                 f"📊 **سعر المنصة المباشر:** {spot_price}\n"
-                f"📏 **تذبذب السوق (ATR):** {round(atr, 2)}\n"
-                f"📐 **فارق الآجل/الفوري (Basis):** {basis}\n"
+                f"📏 **مؤشر ATR:** {round(atr, 2)}\n"
+                f"📐 **فارق الآجل/الفوري:** {basis}\n"
                 f"📈 **مؤشر RSI:** {rsi}\n\n"
                 f"{emoji} **نوع الأمر المعلق:** {order['type']}\n"
                 f"🎯 **سعر الدخول (Entry):** {order['entry']}\n"
                 f"🟢 **الهدف (TP):** {order['tp']}\n"
                 f"🔴 **وقف الخسارة (SL):** {order['sl']}\n\n"
-                f"📌 *ملاحظة: تم توسيع وقف الخسارة تلقائياً ليستوعب تذبذب الذهب ويمنع ضرب الستوب المبكر.*"
+                f"📌 *توصية صادرة فور إغلاق الشمعة.*"
             )
 
             try:
                 await bot.send_message(chat_id=chat_id, text=msg, parse_mode="Markdown")
-                print(f"[{time.strftime('%H:%M:%S')}] ATR-adjusted signal sent successfully.")
+                print(f"[{time.strftime('%H:%M:%S')}] M15 Signal sent successfully.")
             except Exception as e:
                 print(f"Send Error: {e}")
         else:
-            print(f"[{time.strftime('%H:%M:%S')}] Monitoring market structure...")
+            print(f"[{time.strftime('%H:%M:%S')}] M15 candle closed with no signal setup.")
 
-        await asyncio.sleep(300)
+        # انتظار دقيقة لتفادي التكرار في نفس الشمعة
+        await asyncio.sleep(60)
 
 if __name__ == "__main__":
     Thread(target=run_web_server, daemon=True).start()
