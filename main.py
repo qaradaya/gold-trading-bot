@@ -10,7 +10,7 @@ app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "Complete Institutional Gold Trading Bot is Live!"
+    return "Optimized Institutional Gold Bot is Live!"
 
 def run_web_server():
     port = int(os.environ.get("PORT", 10000))
@@ -18,7 +18,7 @@ def run_web_server():
 
 active_order = None
 
-# دالة حساب RSI المخصصة
+# حساب مؤشر القوة النسبية RSI
 def calculate_rsi(closes, window=14):
     gains = []
     losses = []
@@ -40,7 +40,7 @@ def calculate_rsi(closes, window=14):
     rs = avg_gain / avg_loss
     return round(100 - (100 / (1 + rs)), 2)
 
-# دالة حساب EMA
+# حساب المتوسط المتحرك الاسي EMA
 def calculate_ema(data, window):
     weights = [2 / (window + 1)]
     ema = [data[0]]
@@ -69,13 +69,10 @@ def get_institutional_gold_signal():
             print(f"Twelve Data Error: {res_spot.get('message', 'No Spot Data')}")
             return None, 0, 0, 0
 
-        # الاستعانة بالبيانات المتاحة
         spot_values = res_spot["values"]
         spot_values.reverse()
 
         spot_closes = [float(item["close"]) for item in spot_values]
-        spot_highs = [float(item["high"]) for item in spot_values]
-        spot_lows = [float(item["low"]) for item in spot_values]
 
         if "values" in res_futures:
             futures_values = res_futures["values"]
@@ -83,34 +80,28 @@ def get_institutional_gold_signal():
             futures_closes = [float(item["close"]) for item in futures_values]
             futures_volumes = [float(item.get("volume", 0)) for item in futures_values]
         else:
-            # Fallback في حال عدم توفر رمز العقود الآجلة في الباقة المجانية
             futures_closes = spot_closes
             futures_volumes = [100] * len(spot_closes)
 
-        # الأسعار والمؤشرات الحالية
         spot_price = round(spot_closes[-1], 2)
         futures_price = round(futures_closes[-1], 2)
 
-        # 1. تحليل الفارق السعري (Basis Analysis)
+        # 1. تحليل الفارق السعري (Basis Expansion)
         basis_current = round(futures_price - spot_price, 2)
         basis_prev = round(futures_closes[-2] - spot_closes[-2], 2)
         basis_expansion = round(basis_current - basis_prev, 2)
 
-        # 2. تحليل أحجام التداول والسيولة (Volume Check)
+        # 2. تحليل الأحجام والسيولة (Volume Check)
         volume_current = futures_volumes[-1]
         volume_avg = sum(futures_volumes[-5:-1]) / 4 if len(futures_volumes) >= 5 else volume_current
         volume_surging = volume_current > volume_avg
 
-        # 3. حساب المؤشرات الفنية (EMA & RSI)
+        # 3. المؤشرات الفنية (EMA & RSI)
         ema20 = calculate_ema(spot_closes, 20)[-1]
         ema50 = calculate_ema(spot_closes, 50)[-1]
         rsi = calculate_rsi(spot_closes, 14)
 
-        # القمم والقيعان لآخر 4 شمعات مكتملة
-        last_4_high = max(spot_highs[-5:-1])
-        last_4_low = min(spot_lows[-5:-1])
-
-        # إدارة الصفقة القائمة عند التفعيل أو الوصول للأهداف
+        # إدارة الصفقة القائمة
         if active_order is not None:
             if active_order['type'] == 'Buy Stop' and spot_price >= active_order['tp']:
                 active_order = None
@@ -124,40 +115,36 @@ def get_institutional_gold_signal():
             return active_order, spot_price, basis_current, rsi
 
         # -------------------------------------------------------------
-        # شروط الدخول المركبة (السيولة + الهيكل + الاتجاه)
+        # شروط الدخول المحسّنة (مسافة دخول قريبة ودقيقة من السعر المباشر)
         # -------------------------------------------------------------
 
-        # شرط Buy Stop المؤسسي:
-        # - اتجاه صاعد (EMA20 > EMA50)
-        # - عدم وجود تشبع شرائي (RSI < 68)
-        # - اندفاع سيولة وارتفاع حجم التداول وتوسع الفارق (Basis Expansion >= 0.15)
+        # شرط Buy Stop المؤسسي المباشر
         if ema20 > ema50 and rsi < 68 and (basis_expansion >= 0.15 or volume_surging):
-            proposed_entry = round(max(last_4_high, spot_price) + 1.20, 2)
-            if proposed_entry > (spot_price + 0.80):
-                active_order = {
-                    "type": "Buy Stop",
-                    "entry": proposed_entry,
-                    "tp": round(proposed_entry + 8.0, 2),
-                    "sl": round(proposed_entry - 4.0, 2),
-                    "rsi": rsi,
-                    "reason": "تدفق سيولة شرائية على العقود الآجلة مع دعم فني (Basis Expansion & Volume Surge)"
-                }
+            # تحديد الدخول بفارق 1.50$ فقط أعلى السعر المباشر الحالي
+            proposed_entry = round(spot_price + 1.50, 2)
+            
+            active_order = {
+                "type": "Buy Stop",
+                "entry": proposed_entry,
+                "tp": round(proposed_entry + 6.0, 2),
+                "sl": round(proposed_entry - 3.0, 2),
+                "rsi": rsi,
+                "reason": "تدفق سيولة شرائية على العقود الآجلة - دخول قريب من السعر المباشر"
+            }
 
-        # شرط Sell Stop المؤسسي:
-        # - اتجاه هابط (EMA20 < EMA50)
-        # - عدم وجود تشبع بيعي (RSI > 32)
-        # - ضغط بيعي مؤسسي وتوسع الفارق سلباً (Basis Expansion <= -0.15)
+        # شرط Sell Stop المؤسسي المباشر
         elif ema20 < ema50 and rsi > 32 and (basis_expansion <= -0.15 or volume_surging):
-            proposed_entry = round(min(last_4_low, spot_price) - 1.20, 2)
-            if proposed_entry < (spot_price - 0.80):
-                active_order = {
-                    "type": "Sell Stop",
-                    "entry": proposed_entry,
-                    "tp": round(proposed_entry - 8.0, 2),
-                    "sl": round(proposed_entry + 4.0, 2),
-                    "rsi": rsi,
-                    "reason": "تسارع ضغوط بيعية مؤسسية على بورصة العقود الآجلة"
-                }
+            # تحديد الدخول بفارق 1.50$ فقط أسفل السعر المباشر الحالي
+            proposed_entry = round(spot_price - 1.50, 2)
+            
+            active_order = {
+                "type": "Sell Stop",
+                "entry": proposed_entry,
+                "tp": round(proposed_entry - 6.0, 2),
+                "sl": round(proposed_entry + 3.0, 2),
+                "rsi": rsi,
+                "reason": "تسارع ضغوط بيعية مؤسسية على العقود الآجلة - دخول قريب من السعر المباشر"
+            }
 
         return active_order, spot_price, basis_current, rsi
 
@@ -181,7 +168,7 @@ async def main_loop():
         if order:
             emoji = "🟢" if order['type'] == "Buy Stop" else "🔴"
             msg = (
-                f"🚨 **إشارة دخول مؤسسية مرشحة (Institutional Order Flow)**\n"
+                f"🚨 **إشارة دخول مؤسسية سريعة (Tight Order Flow)**\n"
                 f"⏱ **الفريم:** 15 دقيقة (M15) | **الرمز:** XAUUSD\n\n"
                 f"📊 **سعر المنصة المباشر:** {spot_price}\n"
                 f"📐 **فارق الآجل/الفوري (Basis):** {basis}\n"
@@ -191,12 +178,12 @@ async def main_loop():
                 f"🎯 **سعر الدخول (Entry):** {order['entry']}\n"
                 f"🟢 **الهدف (TP):** {order['tp']}\n"
                 f"🔴 **وقف الخسارة (SL):** {order['sl']}\n\n"
-                f"📌 *أدخل الأمر بنفس القيم الموضحة على منصتك فوراً.*"
+                f"📌 *المسافة قريبة جداً من السعر اللحظي (1.5$ فقط)، نفذ الأمر معلقاً على منصتك فوراً.*"
             )
 
             try:
                 await bot.send_message(chat_id=chat_id, text=msg, parse_mode="Markdown")
-                print(f"[{time.strftime('%H:%M:%S')}] Comprehensive signal sent successfully.")
+                print(f"[{time.strftime('%H:%M:%S')}] Tight institutional signal sent successfully.")
             except Exception as e:
                 print(f"Send Error: {e}")
         else:
