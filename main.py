@@ -11,7 +11,7 @@ app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "Professional Gold Trading Bot & MT5 Bridge is Live!"
+    return "Validated Gold Trading Bot is Live!"
 
 def run_web_server():
     port = int(os.environ.get("PORT", 10000))
@@ -42,10 +42,11 @@ def get_pro_gold_signal():
         latest = df.iloc[-1]
         current_price = round(latest['Close'], 2)
         
+        # أعلى وأقل سعر للشموع المكتملة السابقة (باستثناء الشمعة الحالية)
         last_4_high = df['High'].iloc[-5:-1].max()
         last_4_low = df['Low'].iloc[-5:-1].min()
 
-        # إرجاع الصفقة الحالية إذا كانت قائمة
+        # إرجاع الصفقة الحالية إذا كانت قائمة ولم تضرب الهدف/الستوب
         if active_order is not None:
             if active_order['type'] == 'Buy Stop' and current_price >= active_order['tp']:
                 active_order = None
@@ -62,26 +63,35 @@ def get_pro_gold_signal():
         ema50 = latest['EMA50']
         rsi = latest['RSI']
 
-        # شرط دخول Buy Stop
-        if ema20 >= ema50:
-            entry = round(last_4_high + 0.80, 2)
-            active_order = {
-                "type": "Buy Stop",
-                "entry": entry,
-                "tp": round(entry + 8.0, 2),
-                "sl": round(entry - 4.0, 2),
-                "rsi": round(rsi, 1)
-            }
-        # شرط دخول Sell Stop
-        elif ema20 < ema50:
-            entry = round(last_4_low - 0.80, 2)
-            active_order = {
-                "type": "Sell Stop",
-                "entry": entry,
-                "tp": round(entry - 8.0, 2),
-                "sl": round(entry + 4.0, 2),
-                "rsi": round(rsi, 1)
-            }
+        # --- فلترة وتدقيق صحة أرقام الأمر المعلق ---
+        
+        # شرط Buy Stop: الاتجاه صاعد + سعر الدخول يجب أن يكون **أعلى** من السعر الحالي بـ 1 دولار على الأقل
+        if ema20 > ema50 and rsi < 65:
+            proposed_entry = round(max(last_4_high, current_price) + 1.20, 2)
+            
+            # التأكد القطعي أن سعر الدخول أعلى من السعر الحالي
+            if proposed_entry > (current_price + 0.80):
+                active_order = {
+                    "type": "Buy Stop",
+                    "entry": proposed_entry,
+                    "tp": round(proposed_entry + 8.0, 2),
+                    "sl": round(proposed_entry - 4.0, 2),
+                    "rsi": round(rsi, 1)
+                }
+
+        # شرط Sell Stop: الاتجاه هابط + سعر الدخول يجب أن يكون **أقل** من السعر الحالي بـ 1 دولار على الأقل
+        elif ema20 < ema50 and rsi > 35:
+            proposed_entry = round(min(last_4_low, current_price) - 1.20, 2)
+            
+            # التأكد القطعي أن سعر الدخول أقل من السعر الحالي
+            if proposed_entry < (current_price - 0.80):
+                active_order = {
+                    "type": "Sell Stop",
+                    "entry": proposed_entry,
+                    "tp": round(proposed_entry - 8.0, 2),
+                    "sl": round(proposed_entry + 4.0, 2),
+                    "rsi": round(rsi, 1)
+                }
 
         return active_order, current_price
 
@@ -105,17 +115,16 @@ async def main_loop():
         if order:
             emoji = "🟢" if order['type'] == "Buy Stop" else "🔴"
             msg = (
-                f"🏆 **توصية ذهب معلقة (XAUUSD)**\n"
+                f"🏆 **توصية ذهب معلقة دقيقة (XAUUSD)**\n"
                 f"⏱ **الفريم:** 15 دقيقة (M15)\n\n"
-                f"📍 **السعر الحالي:** {current_price}\n"
+                f"📍 **السعر الحالي بالسوق:** {current_price}\n"
                 f"{emoji} **نوع الأمر:** {order['type']}\n"
-                f"🎯 **سعر الدخول (Entry):** {order['entry']}\n"
+                f"🎯 **سعر الدخول المعلق (Entry):** {order['entry']}\n"
                 f"🟢 **الهدف (TP):** {order['tp']}\n"
                 f"🔴 **وقف الخسارة (SL):** {order['sl']}\n\n"
-                f"👇 **اضغط الأسفل للتنفيذ المباشر على MT5:**"
+                f"👇 **اختر إجراء التنفيذ على MT5:**"
             )
             
-            # أزرار التفاعلية لتنفيذ الصفقة بنقرة واحدة
             keyboard = [
                 [
                     InlineKeyboardButton("🚀 تنفيذ معلق الآن (Pending)", callback_data=f"EXEC_PENDING_{order['type']}"),
@@ -126,11 +135,11 @@ async def main_loop():
 
             try:
                 await bot.send_message(chat_id=chat_id, text=msg, parse_mode="Markdown", reply_markup=reply_markup)
-                print(f"[{time.strftime('%H:%M:%S')}] Signal sent with MT5 Action buttons.")
+                print(f"[{time.strftime('%H:%M:%S')}] Validated signal sent to Telegram.")
             except Exception as e:
                 print(f"Send Error: {e}")
         else:
-            print(f"[{time.strftime('%H:%M:%S')}] Waiting for technical confirmation...")
+            print(f"[{time.strftime('%H:%M:%S')}] No valid future pending order found.")
 
         await asyncio.sleep(300)
 
