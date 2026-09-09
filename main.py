@@ -11,15 +11,22 @@ app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "5-Min Alert M15 Gold Bot is Live!"
+    return "Synchronized 5-Min M15 Gold Bot is Live!"
 
 def run_web_server():
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
 
-# متغيرات متابعة حالة الصفقة
 active_order = None
-order_status = None  # يمكن أن تكون: "PENDING" أو "TRIGGERED"
+order_status = None  # PENDING أو TRIGGERED
+
+# دالة التزامن مع رأس الدقيقة القابلة للقسمة على 5 بالضبط
+async def wait_for_next_5min_mark():
+    while True:
+        now = datetime.utcnow()
+        if now.minute % 5 == 0 and now.second < 5:
+            break
+        await asyncio.sleep(1)
 
 def calculate_rsi(closes, window=14):
     gains, losses = [], []
@@ -47,8 +54,15 @@ def calculate_ema(data, window):
 
 def analyze_gold_market():
     global active_order, order_status
-    api_key = os.environ.get("TWELVE_DATA_API_KEY")
     
+    # -------------------------------------------------------------
+    # 1. حظر الفحص أثناء فترة تسوية السوق اليومية (من 21:00 إلى 22:00 UTC)
+    # -------------------------------------------------------------
+    now_utc = datetime.utcnow()
+    if now_utc.hour == 21:
+        return None, "MARKET_CLOSED", 0, 0, 0
+
+    api_key = os.environ.get("TWELVE_DATA_API_KEY")
     if not api_key:
         print("Error: TWELVE_DATA_API_KEY missing!")
         return None, "NO_KEY", 0, 0, 0
@@ -91,7 +105,6 @@ def analyze_gold_market():
         volume_avg = sum(futures_volumes[-5:-1]) / 4 if len(futures_volumes) >= 5 else volume_current
         volume_surging = volume_current > volume_avg
 
-        # المؤشرات محسوبة على شمعة M15
         ema20 = calculate_ema(spot_closes, 20)[-1]
         ema50 = calculate_ema(spot_closes, 50)[-1]
         rsi = calculate_rsi(spot_closes, 14)
@@ -100,10 +113,10 @@ def analyze_gold_market():
         structural_swing_low = min(spot_lows[-5:-1])
 
         # -------------------------------------------------------------
-        # 1. متابعة وإدارة الصفقة القائمة حالياً
+        # 2. إدارة وتحديث الصفقة الحالية
         # -------------------------------------------------------------
         if active_order is not None:
-            # فحص تفعيل الصفقة المعلقة
+            # فحص التفعيل
             if order_status == "PENDING":
                 if active_order['type'] == 'Buy Stop' and spot_price >= active_order['entry']:
                     order_status = "TRIGGERED"
@@ -112,7 +125,7 @@ def analyze_gold_market():
                     order_status = "TRIGGERED"
                     return active_order, "JUST_TRIGGERED", spot_price, basis_current, rsi
 
-            # فحص إغلاق الصفقة (ضرب الهدف أو الستوب)
+            # فحص الخروج
             if active_order['type'] == 'Buy Stop':
                 if spot_price >= active_order['tp'] or spot_price <= active_order['sl']:
                     active_order = None
@@ -124,12 +137,21 @@ def analyze_gold_market():
                     order_status = None
                     return None, "CLOSED", spot_price, basis_current, rsi
 
-            # الصفقة ما زالت قائمة ولم تتفعل أو ما زالت مفعلة وقيد التنفيذ
-            status_event = "STILL_TRIGGERED" if order_status == "TRIGGERED" else "STILL_PENDING"
-            return active_order, status_event, spot_price, basis_current, rsi
+            # إلغاء الصفقة المعلقة في حال تغير الاتجاه الفني كلياً
+            if order_status == "PENDING":
+                if active_order['type'] == 'Buy Stop' and ema20 < ema50:
+                    active_order = None
+                    order_status = None
+                elif active_order['type'] == 'Sell Stop' and ema20 > ema50:
+                    active_order = None
+                    order_status = None
+
+            if active_order is not None:
+                status_event = "STILL_TRIGGERED" if order_status == "TRIGGERED" else "STILL_PENDING"
+                return active_order, status_event, spot_price, basis_current, rsi
 
         # -------------------------------------------------------------
-        # 2. إنشاء صفقة جديدة بناءً على إغلاق M15
+        # 3. توليد إشارة جديدة
         # -------------------------------------------------------------
         if ema20 > ema50 and rsi < 68 and (basis_expansion >= 0.10 or volume_surging):
             proposed_entry = round(max(structural_swing_high, spot_price) + 1.20, 2)
@@ -142,8 +164,7 @@ def analyze_gold_market():
                 "entry": proposed_entry,
                 "tp": tp_price,
                 "sl": sl_price,
-                "rsi": rsi,
-                "reason": "تأكيد هيكل M15 - اتجاه صاعد مع تدفق سيولة"
+                "rsi": rsi
             }
             order_status = "PENDING"
             return active_order, "NEW_ORDER", spot_price, basis_current, rsi
@@ -159,8 +180,7 @@ def analyze_gold_market():
                 "entry": proposed_entry,
                 "tp": tp_price,
                 "sl": sl_price,
-                "rsi": rsi,
-                "reason": "تأكيد هيكل M15 - اتجاه هابط مع ضغوط بيعية"
+                "rsi": rsi
             }
             order_status = "PENDING"
             return active_order, "NEW_ORDER", spot_price, basis_current, rsi
@@ -182,69 +202,51 @@ async def main_loop():
     bot = Bot(token=token)
 
     while True:
+        # الانتظار حتى الدقيقة القادمة المظبوطة (مثل 00, 05, 10, 15... إلخ)
+        await wait_for_next_5min_mark()
+        
         order, event, spot_price, basis, rsi = analyze_gold_market()
         
-        if order:
+        if event == "MARKET_CLOSED":
+            print(f"[{time.strftime('%H:%M:%S')}] Market closed for settlement. Skipping.")
+        elif order:
             emoji = "🟢" if order['type'] == "Buy Stop" else "🔴"
             
-            # 1. إشارة جديدة أو تذكير بإشارة معلقة (كل 5 دقائق)
             if event in ["NEW_ORDER", "STILL_PENDING"]:
-                msg_header = "🚨 **إشارة تداول جديدة (تحليل M15)**" if event == "NEW_ORDER" else "⏳ **تحديث التنبيه (الصفقة ما زالت معلقة ولم تتفعل)**"
+                msg_header = "🚨 **إشارة جديدة (إغلاق M15)**" if event == "NEW_ORDER" else "⏳ **تذكير بالصفقة المعلقة**"
                 
                 msg = (
                     f"{msg_header}\n"
-                    f"⏱ **الفحص:** كل 5 دقائق | **الاعتماد:** شمعة M15\n\n"
-                    f"📊 **سعر المنصة المباشر:** `{spot_price}`\n"
+                    f"⏱ **توقيت الفحص:** {time.strftime('%H:%M')} | **الرمز:** XAUUSD\n\n"
+                    f"📊 **سعر المنصة:** `{spot_price}`\n"
                     f"📐 **فارق الآجل/الفوري:** `{basis}`\n"
                     f"📈 **مؤشر RSI:** `{rsi}`\n\n"
                     f"{emoji} **نوع الأمر المعلق:** {order['type']}\n"
-                    f"🎯 **سعر الدخول (Entry):** `{order['entry']}`\n"
-                    f"🟢 **الهدف (TP):** `{order['tp']}`\n"
-                    f"🔴 **وقف الخسارة (SL):** `{order['sl']}`\n\n"
-                    f"📌 *اضغط على أي رقم لنسخه فوراً. الصفقة قائمة بانتظار التفعيل.*"
+                    f"🎯 **سعر الدخول:** `{order['entry']}`\n"
+                    f"🟢 **الهدف:** `{order['tp']}`\n"
+                    f"🔴 **وقف الخسارة:** `{order['sl']}`\n\n"
+                    f"📌 *اضغط على الرقم لنسخه.*"
                 )
                 try:
                     await bot.send_message(chat_id=chat_id, text=msg, parse_mode="Markdown")
-                    print(f"[{time.strftime('%H:%M:%S')}] Alert sent ({event}).")
                 except Exception as e:
                     print(f"Send Error: {e}")
 
-            # 2. التنبيه عند تفعيل الصفقة لأول مرة
             elif event == "JUST_TRIGGERED":
                 msg = (
                     f"⚡️ **تم تفعيل الصفقة الآن!**\n\n"
                     f" Symbol: **XAUUSD** | Type: **{order['type']}**\n"
                     f"📍 **سعر التفعيل:** `{spot_price}`\n"
                     f"🟢 **الهدف:** `{order['tp']}`\n"
-                    f"🔴 **الستوب:** `{order['sl']}`\n\n"
-                    f"⏳ *الصفقة دخلت السوق وهي قيد التنفيذ، بانتظار حسم الهدف أو الستوب لبدء صفقة جديدة.*"
+                    f"🔴 **الستوب:** `{order['sl']}`"
                 )
                 try:
                     await bot.send_message(chat_id=chat_id, text=msg, parse_mode="Markdown")
-                    print(f"[{time.strftime('%H:%M:%S')}] Trigger alert sent.")
                 except Exception as e:
                     print(f"Send Error: {e}")
 
-            # 3. إشعار الاستمرار أثناء تنفيذ الصفقة
-            elif event == "STILL_TRIGGERED":
-                msg = (
-                    f"🔄 **الصفقة الحالية قيد التنفيذ**\n\n"
-                    f"📊 **السعر الحالي:** `{spot_price}`\n"
-                    f"🎯 **هدف الصفقة:** `{order['tp']}`\n"
-                    f"🔴 **وقف الخسارة:** `{order['sl']}`\n\n"
-                    f"⏳ *بانتظار إغلاق الصفقة الحالية لحساب إشارة جديدة.*"
-                )
-                try:
-                    await bot.send_message(chat_id=chat_id, text=msg, parse_mode="Markdown")
-                    print(f"[{time.strftime('%H:%M:%S')}] Ongoing execution alert sent.")
-                except Exception as e:
-                    print(f"Send Error: {e}")
-
-        else:
-            print(f"[{time.strftime('%H:%M:%S')}] Check complete - No active setup.")
-
-        # التكرار والدوران كل 5 دقائق (300 ثانية)
-        await asyncio.sleep(300)
+        # انتظار 10 ثوانٍ لت تجاوز نطاق الدقيقة القابلة للقسمة لعدم تكرار الإرسال في نفس الدقيقة
+        await asyncio.sleep(10)
 
 if __name__ == "__main__":
     Thread(target=run_web_server, daemon=True).start()
