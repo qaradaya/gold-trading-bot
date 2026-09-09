@@ -11,7 +11,7 @@ app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "Validated Gold Trading Bot is Live!"
+    return "Validated Spot Gold Trading Bot is Live!"
 
 def run_web_server():
     port = int(os.environ.get("PORT", 10000))
@@ -22,7 +22,8 @@ active_order = None
 def get_pro_gold_signal():
     global active_order
     try:
-        ticker = yf.Ticker("GC=F")
+        # استخدام رمز الذهب الفوري XAUUSD=X بدلاً من العقود الآجلة GC=F ليعطي سعر المنصات
+        ticker = yf.Ticker("XAUUSD=X")
         df = ticker.history(period="2d", interval="15m")
         
         if df.empty or len(df) < 30:
@@ -42,7 +43,7 @@ def get_pro_gold_signal():
         latest = df.iloc[-1]
         current_price = round(latest['Close'], 2)
         
-        # أعلى وأقل سعر للشموع المكتملة السابقة (باستثناء الشمعة الحالية)
+        # أعلى وأقل سعر للشموع المكتملة السابقة
         last_4_high = df['High'].iloc[-5:-1].max()
         last_4_low = df['Low'].iloc[-5:-1].min()
 
@@ -63,13 +64,10 @@ def get_pro_gold_signal():
         ema50 = latest['EMA50']
         rsi = latest['RSI']
 
-        # --- فلترة وتدقيق صحة أرقام الأمر المعلق ---
-        
-        # شرط Buy Stop: الاتجاه صاعد + سعر الدخول يجب أن يكون **أعلى** من السعر الحالي بـ 1 دولار على الأقل
+        # شرط Buy Stop: اتجاه صاعد + سعر الدخول أعلى من السعر الحالي بـ 1.20$ على الأقل
         if ema20 > ema50 and rsi < 65:
             proposed_entry = round(max(last_4_high, current_price) + 1.20, 2)
             
-            # التأكد القطعي أن سعر الدخول أعلى من السعر الحالي
             if proposed_entry > (current_price + 0.80):
                 active_order = {
                     "type": "Buy Stop",
@@ -79,11 +77,10 @@ def get_pro_gold_signal():
                     "rsi": round(rsi, 1)
                 }
 
-        # شرط Sell Stop: الاتجاه هابط + سعر الدخول يجب أن يكون **أقل** من السعر الحالي بـ 1 دولار على الأقل
+        # شرط Sell Stop: اتجاه هابط + سعر الدخول أقل من السعر الحالي بـ 1.20$ على الأقل
         elif ema20 < ema50 and rsi > 35:
             proposed_entry = round(min(last_4_low, current_price) - 1.20, 2)
             
-            # التأكد القطعي أن سعر الدخول أقل من السعر الحالي
             if proposed_entry < (current_price - 0.80):
                 active_order = {
                     "type": "Sell Stop",
@@ -115,31 +112,23 @@ async def main_loop():
         if order:
             emoji = "🟢" if order['type'] == "Buy Stop" else "🔴"
             msg = (
-                f"🏆 **توصية ذهب معلقة دقيقة (XAUUSD)**\n"
+                f"🏆 **توصية ذهب فورية دقيقة (XAUUSD)**\n"
                 f"⏱ **الفريم:** 15 دقيقة (M15)\n\n"
                 f"📍 **السعر الحالي بالسوق:** {current_price}\n"
                 f"{emoji} **نوع الأمر:** {order['type']}\n"
                 f"🎯 **سعر الدخول المعلق (Entry):** {order['entry']}\n"
                 f"🟢 **الهدف (TP):** {order['tp']}\n"
                 f"🔴 **وقف الخسارة (SL):** {order['sl']}\n\n"
-                f"👇 **اختر إجراء التنفيذ على MT5:**"
+                f"📌 *الصفقة معلقة وثابتة حتى التفعيل أو ضرب الهدف/الستوب.*"
             )
-            
-            keyboard = [
-                [
-                    InlineKeyboardButton("🚀 تنفيذ معلق الآن (Pending)", callback_data=f"EXEC_PENDING_{order['type']}"),
-                    InlineKeyboardButton("⚡ تنفيذ بالسعر الحالي (Market)", callback_data="EXEC_MARKET")
-                ]
-            ]
-            reply_markup = InlineKeyboardMarkup(keyboard)
 
             try:
-                await bot.send_message(chat_id=chat_id, text=msg, parse_mode="Markdown", reply_markup=reply_markup)
-                print(f"[{time.strftime('%H:%M:%S')}] Validated signal sent to Telegram.")
+                await bot.send_message(chat_id=chat_id, text=msg, parse_mode="Markdown")
+                print(f"[{time.strftime('%H:%M:%S')}] Spot Gold signal sent to Telegram.")
             except Exception as e:
                 print(f"Send Error: {e}")
         else:
-            print(f"[{time.strftime('%H:%M:%S')}] No valid future pending order found.")
+            print(f"[{time.strftime('%H:%M:%S')}] Waiting for setup...")
 
         await asyncio.sleep(300)
 
