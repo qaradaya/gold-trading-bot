@@ -11,7 +11,7 @@ app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "Synchronized 5-Min M15 Gold Bot is Live!"
+    return "Fixed 5-Min M15 Gold Bot is Live!"
 
 def run_web_server():
     port = int(os.environ.get("PORT", 10000))
@@ -20,7 +20,7 @@ def run_web_server():
 active_order = None
 order_status = None  # PENDING أو TRIGGERED
 
-# دالة التزامن مع رأس الدقيقة القابلة للقسمة على 5 بالضبط
+# التزامن مع رأس الدقيقة القابلة للقسمة على 5
 async def wait_for_next_5min_mark():
     while True:
         now = datetime.utcnow()
@@ -55,9 +55,7 @@ def calculate_ema(data, window):
 def analyze_gold_market():
     global active_order, order_status
     
-    # -------------------------------------------------------------
-    # 1. حظر الفحص أثناء فترة تسوية السوق اليومية (من 21:00 إلى 22:00 UTC)
-    # -------------------------------------------------------------
+    # حظر حقيقي ينتهي فوراً بعد انتهاء الساعة 21:00 UTC (تسوية نيويورك)
     now_utc = datetime.utcnow()
     if now_utc.hour == 21:
         return None, "MARKET_CLOSED", 0, 0, 0
@@ -112,11 +110,8 @@ def analyze_gold_market():
         structural_swing_high = max(spot_highs[-5:-1])
         structural_swing_low = min(spot_lows[-5:-1])
 
-        # -------------------------------------------------------------
-        # 2. إدارة وتحديث الصفقة الحالية
-        # -------------------------------------------------------------
+        # إدارة الصفقة الحالية
         if active_order is not None:
-            # فحص التفعيل
             if order_status == "PENDING":
                 if active_order['type'] == 'Buy Stop' and spot_price >= active_order['entry']:
                     order_status = "TRIGGERED"
@@ -125,7 +120,6 @@ def analyze_gold_market():
                     order_status = "TRIGGERED"
                     return active_order, "JUST_TRIGGERED", spot_price, basis_current, rsi
 
-            # فحص الخروج
             if active_order['type'] == 'Buy Stop':
                 if spot_price >= active_order['tp'] or spot_price <= active_order['sl']:
                     active_order = None
@@ -137,7 +131,6 @@ def analyze_gold_market():
                     order_status = None
                     return None, "CLOSED", spot_price, basis_current, rsi
 
-            # إلغاء الصفقة المعلقة في حال تغير الاتجاه الفني كلياً
             if order_status == "PENDING":
                 if active_order['type'] == 'Buy Stop' and ema20 < ema50:
                     active_order = None
@@ -150,9 +143,7 @@ def analyze_gold_market():
                 status_event = "STILL_TRIGGERED" if order_status == "TRIGGERED" else "STILL_PENDING"
                 return active_order, status_event, spot_price, basis_current, rsi
 
-        # -------------------------------------------------------------
-        # 3. توليد إشارة جديدة
-        # -------------------------------------------------------------
+        # توليد صفقة جديدة
         if ema20 > ema50 and rsi < 68 and (basis_expansion >= 0.10 or volume_surging):
             proposed_entry = round(max(structural_swing_high, spot_price) + 1.20, 2)
             sl_price = round(structural_swing_low - 0.50, 2)
@@ -202,13 +193,12 @@ async def main_loop():
     bot = Bot(token=token)
 
     while True:
-        # الانتظار حتى الدقيقة القادمة المظبوطة (مثل 00, 05, 10, 15... إلخ)
         await wait_for_next_5min_mark()
         
         order, event, spot_price, basis, rsi = analyze_gold_market()
         
         if event == "MARKET_CLOSED":
-            print(f"[{time.strftime('%H:%M:%S')}] Market closed for settlement. Skipping.")
+            print(f"[{time.strftime('%H:%M:%S')}] Market closed for settlement.")
         elif order:
             emoji = "🟢" if order['type'] == "Buy Stop" else "🔴"
             
@@ -245,7 +235,6 @@ async def main_loop():
                 except Exception as e:
                     print(f"Send Error: {e}")
 
-        # انتظار 10 ثوانٍ لت تجاوز نطاق الدقيقة القابلة للقسمة لعدم تكرار الإرسال في نفس الدقيقة
         await asyncio.sleep(10)
 
 if __name__ == "__main__":
