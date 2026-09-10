@@ -11,7 +11,7 @@ app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "Ultra-Filtered Pro Scalper M15 Gold Bot is Live!"
+    return "Pro Scalper M15 Gold Bot with Status Updates is Live!"
 
 def run_web_server():
     port = int(os.environ.get("PORT", 10000))
@@ -20,7 +20,6 @@ def run_web_server():
 active_order = None
 order_status = None 
 
-# التزامن مع رأس الدقيقة القابلة للقسمة على 5
 async def wait_for_next_5min_mark():
     while True:
         now = datetime.utcnow()
@@ -55,7 +54,6 @@ def calculate_ema(data, window):
 def analyze_gold_market():
     global active_order, order_status
     
-    # حظر التداول أثناء ساعة الإغلاق والتسوية اليومية (21:00 UTC)
     now_utc = datetime.utcnow()
     if now_utc.hour == 21:
         return None, "MARKET_CLOSED", 0, 0, 0
@@ -107,7 +105,6 @@ def analyze_gold_market():
         ema50 = calculate_ema(spot_closes, 50)[-1]
         rsi = calculate_rsi(spot_closes, 14)
 
-        # قمم وقيعان الشموع الـ 3 الأخيرة
         tight_swing_high = max(spot_highs[-3:-1])
         tight_swing_low = min(spot_lows[-3:-1])
 
@@ -115,7 +112,6 @@ def analyze_gold_market():
         # 1. إدارة الصفقات الحالية والتفعيل والإلغاء
         # -------------------------------------------------------------
         if active_order is not None:
-            # فحص التفعيل
             if order_status == "PENDING":
                 if active_order['type'] == 'Buy Stop' and spot_price >= active_order['entry']:
                     order_status = "TRIGGERED"
@@ -124,7 +120,6 @@ def analyze_gold_market():
                     order_status = "TRIGGERED"
                     return active_order, "JUST_TRIGGERED", spot_price, basis_current, rsi
 
-            # فحص إغلاق الصفقة المفعلة (TP / SL)
             if order_status == "TRIGGERED":
                 if active_order['type'] == 'Buy Stop':
                     if spot_price >= active_order['tp'] or spot_price <= active_order['sl']:
@@ -137,7 +132,6 @@ def analyze_gold_market():
                         order_status = None
                         return None, "CLOSED", spot_price, basis_current, rsi
 
-            # إلغاء الأمر المعلق إذا انكسر منطق الصفقة قبل التفعيل
             if order_status == "PENDING":
                 if active_order['type'] == 'Buy Stop' and (spot_price <= active_order['sl'] or ema20 < ema50):
                     active_order = None
@@ -153,19 +147,17 @@ def analyze_gold_market():
                 return active_order, status_event, spot_price, basis_current, rsi
 
         # -------------------------------------------------------------
-        # 2. توليد صفقة جديدة (مع صمام أمان المسافات والمنطق)
+        # 2. توليد صفقة جديدة (مع توسيع النطاق لـ 8.00$)
         # -------------------------------------------------------------
         if ema20 > ema50 and rsi < 68 and (basis_expansion >= 0.10 or volume_surging):
-            # الدخول فوق القمة بشرط ألا يبعد أكثر من 2.50$ عن السعر الحالي
-            proposed_entry = round(min(max(tight_swing_high, spot_price) + 0.50, spot_price + 2.50), 2)
+            proposed_entry = round(min(max(tight_swing_high, spot_price) + 0.50, spot_price + 3.00), 2)
             sl_price = round(tight_swing_low - 0.50, 2)
             
-            # شرط الأمان: الدخول > السعر الحالي > الستوب
             if proposed_entry > spot_price > sl_price:
                 risk_distance = proposed_entry - sl_price
                 
-                # تصفية الصفقات: عدم قبول الستوب الأكبر من 6.00$
-                if risk_distance <= 6.00:
+                # تم توسيع نطاق الستوب المقبول ليكون 8.00$
+                if risk_distance <= 8.00:
                     tp_price = round(proposed_entry + (risk_distance * 1.5), 2)
 
                     active_order = {
@@ -179,16 +171,14 @@ def analyze_gold_market():
                     return active_order, "NEW_ORDER", spot_price, basis_current, rsi
 
         elif ema20 < ema50 and rsi > 32 and (basis_expansion <= -0.10 or volume_surging):
-            # الدخول تحت القاع بشرط ألا يبعد أكثر من 2.50$ عن السعر الحالي
-            proposed_entry = round(max(min(tight_swing_low, spot_price) - 0.50, spot_price - 2.50), 2)
+            proposed_entry = round(max(min(tight_swing_low, spot_price) - 0.50, spot_price - 3.00), 2)
             sl_price = round(tight_swing_high + 0.50, 2)
 
-            # شرط الأمان: الدخول < السعر الحالي < الستوب
             if proposed_entry < spot_price < sl_price:
                 risk_distance = sl_price - proposed_entry
                 
-                # تصفية الصفقات: عدم قبول الستوب الأكبر من 6.00$
-                if risk_distance <= 6.00:
+                # تم توسيع نطاق الستوب المقبول ليكون 8.00$
+                if risk_distance <= 8.00:
                     tp_price = round(proposed_entry - (risk_distance * 1.5), 2)
 
                     active_order = {
@@ -225,10 +215,24 @@ async def main_loop():
         if event == "MARKET_CLOSED":
             print(f"[{time.strftime('%H:%M:%S')}] Market closed for settlement.")
             
+        elif event == "NO_SIGNAL":
+            # إرسال إشعار تأكيد عمل البوت كل 5 دقائق عند عدم وجود صفقة
+            status_msg = (
+                f"🔍 **تقرير فحص السوق (نشط)**\n"
+                f"⏱ **التوقيت:** {time.strftime('%H:%M')} | **XAUUSD**\n\n"
+                f"📊 **سعر المنصة:** `{spot_price}`\n"
+                f"📈 **RSI:** `{rsi}` | **الآجل/الفوري:** `{basis}`\n\n"
+                f"⚙️ *البوت يعمل بنجاح ولا توجد إشارة مستوفية للشروط حالياً. جاري المسح المستمر...*"
+            )
+            try:
+                await bot.send_message(chat_id=chat_id, text=status_msg, parse_mode="Markdown")
+            except Exception as e:
+                print(f"Send Error: {e}")
+
         elif event == "CANCELLED_INVALIDATED":
             msg = (
                 f"🚫 **تم إلغاء الإشارة المعلقة تلقائياً**\n\n"
-                f"السبب: تجاوز السعر مستوى وقف الخسارة قبل تفعيل الصفقة، مما أبطل الفكرة الفنية.\n"
+                f"السبب: تجاوز السعر مستوى وقف الخسارة قبل تفعيل الصفقة.\n"
                 f"⏳ *البوت بانتظار تشكل فرصة جديدة...*"
             )
             try:
@@ -252,7 +256,7 @@ async def main_loop():
                     f"🎯 **سعر الدخول:** `{order['entry']}`\n"
                     f"🟢 **الهدف:** `{order['tp']}`\n"
                     f"🔴 **وقف الخسارة:** `{order['sl']}`\n\n"
-                    f"📌 *صفقة سريعة بمخاطرة محددة ولتحركات محميّة.*"
+                    f"📌 *مجال مخاطرة أقصى 8.00$ - هدف 1.5R.*"
                 )
                 try:
                     await bot.send_message(chat_id=chat_id, text=msg, parse_mode="Markdown")
