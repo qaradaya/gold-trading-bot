@@ -5,20 +5,23 @@ import requests
 from datetime import datetime
 from threading import Thread
 from flask import Flask
-from telegram import Bot
+from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
 
 app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "Pro Scalper M15 Gold Bot with Status Updates is Live!"
+    return "Pro Scalper M15 Gold Bot with Control Dashboard is Live!"
 
 def run_web_server():
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
 
+# متغيرات حالة التداول والتحكم
 active_order = None
 order_status = None 
+send_status_reports = True  # خيار التحكم في التقرير الدوري (مُفعل افتراضياً)
 
 async def wait_for_next_5min_mark():
     while True:
@@ -108,9 +111,7 @@ def analyze_gold_market():
         tight_swing_high = max(spot_highs[-3:-1])
         tight_swing_low = min(spot_lows[-3:-1])
 
-        # -------------------------------------------------------------
-        # 1. إدارة الصفقات الحالية والتفعيل والإلغاء
-        # -------------------------------------------------------------
+        # إدارة الصفقات
         if active_order is not None:
             if order_status == "PENDING":
                 if active_order['type'] == 'Buy Stop' and spot_price >= active_order['entry']:
@@ -146,27 +147,16 @@ def analyze_gold_market():
                 status_event = "STILL_TRIGGERED" if order_status == "TRIGGERED" else "STILL_PENDING"
                 return active_order, status_event, spot_price, basis_current, rsi
 
-        # -------------------------------------------------------------
-        # 2. توليد صفقة جديدة (مع توسيع النطاق لـ 8.00$)
-        # -------------------------------------------------------------
+        # توليد الصفقات
         if ema20 > ema50 and rsi < 68 and (basis_expansion >= 0.10 or volume_surging):
             proposed_entry = round(min(max(tight_swing_high, spot_price) + 0.50, spot_price + 3.00), 2)
             sl_price = round(tight_swing_low - 0.50, 2)
             
             if proposed_entry > spot_price > sl_price:
                 risk_distance = proposed_entry - sl_price
-                
-                # تم توسيع نطاق الستوب المقبول ليكون 8.00$
                 if risk_distance <= 8.00:
                     tp_price = round(proposed_entry + (risk_distance * 1.5), 2)
-
-                    active_order = {
-                        "type": "Buy Stop",
-                        "entry": proposed_entry,
-                        "tp": tp_price,
-                        "sl": sl_price,
-                        "rsi": rsi
-                    }
+                    active_order = {"type": "Buy Stop", "entry": proposed_entry, "tp": tp_price, "sl": sl_price, "rsi": rsi}
                     order_status = "PENDING"
                     return active_order, "NEW_ORDER", spot_price, basis_current, rsi
 
@@ -176,18 +166,9 @@ def analyze_gold_market():
 
             if proposed_entry < spot_price < sl_price:
                 risk_distance = sl_price - proposed_entry
-                
-                # تم توسيع نطاق الستوب المقبول ليكون 8.00$
                 if risk_distance <= 8.00:
                     tp_price = round(proposed_entry - (risk_distance * 1.5), 2)
-
-                    active_order = {
-                        "type": "Sell Stop",
-                        "entry": proposed_entry,
-                        "tp": tp_price,
-                        "sl": sl_price,
-                        "rsi": rsi
-                    }
+                    active_order = {"type": "Sell Stop", "entry": proposed_entry, "tp": tp_price, "sl": sl_price, "rsi": rsi}
                     order_status = "PENDING"
                     return active_order, "NEW_ORDER", spot_price, basis_current, rsi
 
@@ -197,44 +178,34 @@ def analyze_gold_market():
         print(f"Execution Error: {e}")
         return None, "ERROR", 0, 0, 0
 
-async def main_loop():
-    token = os.environ.get("TELEGRAM_TOKEN")
-    chat_id = os.environ.get("CHAT_ID")
+# -------------------------------------------------------------
+# دالة إرسال التنبيهات مع فحص خيار التقرير الدوري
+# -------------------------------------------------------------
+async def main_loop(bot: Bot, chat_id: str):
+    global send_status_reports
     
-    if not token or not chat_id:
-        print("Missing TELEGRAM_TOKEN or CHAT_ID environment variables!")
-        return
-
-    bot = Bot(token=token)
-
     while True:
         await wait_for_next_5min_mark()
         
         order, event, spot_price, basis, rsi = analyze_gold_market()
         
-        if event == "MARKET_CLOSED":
-            print(f"[{time.strftime('%H:%M:%S')}] Market closed for settlement.")
-            
-        elif event == "NO_SIGNAL":
-            # إرسال إشعار تأكيد عمل البوت كل 5 دقائق عند عدم وجود صفقة
-            status_msg = (
-                f"🔍 **تقرير فحص السوق (نشط)**\n"
-                f"⏱ **التوقيت:** {time.strftime('%H:%M')} | **XAUUSD**\n\n"
-                f"📊 **سعر المنصة:** `{spot_price}`\n"
-                f"📈 **RSI:** `{rsi}` | **الآجل/الفوري:** `{basis}`\n\n"
-                f"⚙️ *البوت يعمل بنجاح ولا توجد إشارة مستوفية للشروط حالياً. جاري المسح المستمر...*"
-            )
-            try:
-                await bot.send_message(chat_id=chat_id, text=status_msg, parse_mode="Markdown")
-            except Exception as e:
-                print(f"Send Error: {e}")
+        if event == "NO_SIGNAL":
+            # يتم الإرسال فقط إذا كان خيار التقرير مفعلاً
+            if send_status_reports:
+                status_msg = (
+                    f"🔍 **تقرير فحص السوق (نشط)**\n"
+                    f"⏱ **التوقيت:** {time.strftime('%H:%M')} | **XAUUSD**\n\n"
+                    f"📊 **سعر المنصة:** `{spot_price}`\n"
+                    f"📈 **RSI:** `{rsi}` | **الآجل/الفوري:** `{basis}`\n\n"
+                    f"⚙️ *البوت يعمل بنجاح ولا توجد إشارة حالياً.*"
+                )
+                try:
+                    await bot.send_message(chat_id=chat_id, text=status_msg, parse_mode="Markdown")
+                except Exception as e:
+                    print(f"Send Error: {e}")
 
         elif event == "CANCELLED_INVALIDATED":
-            msg = (
-                f"🚫 **تم إلغاء الإشارة المعلقة تلقائياً**\n\n"
-                f"السبب: تجاوز السعر مستوى وقف الخسارة قبل تفعيل الصفقة.\n"
-                f"⏳ *البوت بانتظار تشكل فرصة جديدة...*"
-            )
+            msg = "🚫 **تم إلغاء الإشارة المعلقة تلقائياً** بسبب كسر مستوى وقف الخسارة قبل التفعيل."
             try:
                 await bot.send_message(chat_id=chat_id, text=msg, parse_mode="Markdown")
             except Exception as e:
@@ -242,21 +213,15 @@ async def main_loop():
                 
         elif order:
             emoji = "🟢" if order['type'] == "Buy Stop" else "🔴"
-            
             if event in ["NEW_ORDER", "STILL_PENDING"]:
                 msg_header = "⚡️ **إشارة سكالبينج جديدة (M15)**" if event == "NEW_ORDER" else "⏳ **تذكير بالأمر المعلق**"
-                
                 msg = (
                     f"{msg_header}\n"
-                    f"⏱ **توقيت الفحص:** {time.strftime('%H:%M')} | **الرمز:** XAUUSD\n\n"
-                    f"📊 **سعر المنصة:** `{spot_price}`\n"
-                    f"📐 **فارق الآجل/الفوري:** `{basis}`\n"
-                    f"📈 **مؤشر RSI:** `{rsi}`\n\n"
-                    f"{emoji} **نوع الأمر المعلق:** {order['type']}\n"
-                    f"🎯 **سعر الدخول:** `{order['entry']}`\n"
-                    f"🟢 **الهدف:** `{order['tp']}`\n"
-                    f"🔴 **وقف الخسارة:** `{order['sl']}`\n\n"
-                    f"📌 *مجال مخاطرة أقصى 8.00$ - هدف 1.5R.*"
+                    f"⏱ **التوقيت:** {time.strftime('%H:%M')} | **XAUUSD**\n\n"
+                    f"📊 **السعر:** `{spot_price}` | **RSI:** `{rsi}`\n"
+                    f"{emoji} **النوع:** {order['type']}\n"
+                    f"🎯 **الدخول:** `{order['entry']}`\n"
+                    f"🟢 **الهدف:** `{order['tp']}` | 🔴 **الستوب:** `{order['sl']}`"
                 )
                 try:
                     await bot.send_message(chat_id=chat_id, text=msg, parse_mode="Markdown")
@@ -264,13 +229,7 @@ async def main_loop():
                     print(f"Send Error: {e}")
 
             elif event == "JUST_TRIGGERED":
-                msg = (
-                    f"⚡️ **تم تفعيل صفقة السكالبينج!**\n\n"
-                    f" Symbol: **XAUUSD** | Type: **{order['type']}**\n"
-                    f"📍 **سعر التفعيل:** `{spot_price}`\n"
-                    f"🟢 **الهدف:** `{order['tp']}`\n"
-                    f"🔴 **الستوب:** `{order['sl']}`"
-                )
+                msg = f"⚡️ **تم تفعيل صفقة السكالبينج!**\n\n📍 **سعر التفعيل:** `{spot_price}`"
                 try:
                     await bot.send_message(chat_id=chat_id, text=msg, parse_mode="Markdown")
                 except Exception as e:
@@ -278,6 +237,75 @@ async def main_loop():
 
         await asyncio.sleep(10)
 
+# -------------------------------------------------------------
+# أجهزة التحكم عبر أزرار تليجرام (/settings)
+# -------------------------------------------------------------
+async def settings_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global send_status_reports
+    status_text = "مُفعل 🟢" if send_status_reports else "معطل 🔴"
+    button_text = "🔴 إيقاف التقرير الدوري" if send_status_reports else "🟢 تشغيل التقرير الدوري"
+    
+    keyboard = [[InlineKeyboardButton(button_text, callback_data="toggle_report")]]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await update.message.reply_text(
+        f"⚙️ **لوحة تحكم إعدادات البوت**\n\n"
+        f"الحالة الحالية للتقرير الدوري كل 5 دقائق: **{status_text}**",
+        reply_markup=reply_markup,
+        parse_mode="Markdown"
+    )
+
+async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global send_status_reports
+    query = update.callback_query
+    await query.answer()
+
+    if query.data == "toggle_report":
+        send_status_reports = not send_status_reports
+        status_text = "مُفعل 🟢" if send_status_reports else "معطل 🔴"
+        button_text = "🔴 إيقاف التقرير الدوري" if send_status_reports else "🟢 تشغيل التقرير الدوري"
+        
+        keyboard = [[InlineKeyboardButton(button_text, callback_data="toggle_report")]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+
+        await query.edit_message_text(
+            f"⚙️ **لوحة تحكم إعدادات البوت**\n\n"
+            f"تم تغيير الحالة! التقرير الدوري الآن: **{status_text}**",
+            reply_markup=reply_markup,
+            parse_mode="Markdown"
+        )
+
+# -------------------------------------------------------------
+# التشغيل الرئيسي
+# -------------------------------------------------------------
+async def main():
+    token = os.environ.get("TELEGRAM_TOKEN")
+    chat_id = os.environ.get("CHAT_ID")
+    
+    if not token or not chat_id:
+        print("Missing TELEGRAM_TOKEN or CHAT_ID environment variables!")
+        return
+
+    application = Application.builder().token(token).build()
+
+    # تسجيل الأوامر والأزرار
+    application.add_handler(CommandHandler("settings", settings_command))
+    application.add_handler(CallbackQueryHandler(button_callback))
+
+    bot = application.bot
+    
+    # تشغيل حلقة التحليل في الخلفية
+    asyncio.create_task(main_loop(bot, chat_id))
+
+    # تشغيل الاستماع لأوامر تليجرام
+    await application.initialize()
+    await application.start()
+    await application.updater.start_polling()
+    
+    # الحفاظ على تشغيل التطبيق
+    while True:
+        await asyncio.sleep(3600)
+
 if __name__ == "__main__":
     Thread(target=run_web_server, daemon=True).start()
-    asyncio.run(main_loop())
+    asyncio.run(main())
