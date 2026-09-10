@@ -11,16 +11,15 @@ app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "Fixed 5-Min M15 Gold Bot is Live!"
+    return "Pro Scalper M15 Gold Bot is Live!"
 
 def run_web_server():
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
 
 active_order = None
-order_status = None  # PENDING أو TRIGGERED
+order_status = None 
 
-# التزامن مع رأس الدقيقة القابلة للقسمة على 5
 async def wait_for_next_5min_mark():
     while True:
         now = datetime.utcnow()
@@ -55,7 +54,6 @@ def calculate_ema(data, window):
 def analyze_gold_market():
     global active_order, order_status
     
-    # حظر حقيقي ينتهي فوراً بعد انتهاء الساعة 21:00 UTC (تسوية نيويورك)
     now_utc = datetime.utcnow()
     if now_utc.hour == 21:
         return None, "MARKET_CLOSED", 0, 0, 0
@@ -107,8 +105,9 @@ def analyze_gold_market():
         ema50 = calculate_ema(spot_closes, 50)[-1]
         rsi = calculate_rsi(spot_closes, 14)
 
-        structural_swing_high = max(spot_highs[-5:-1])
-        structural_swing_low = min(spot_lows[-5:-1])
+        # الاعتماد على قمم وقيعان أقرب (آخر 3 شموع بدلاً من 5)
+        tight_swing_high = max(spot_highs[-3:-1])
+        tight_swing_low = min(spot_lows[-3:-1])
 
         # إدارة الصفقة الحالية
         if active_order is not None:
@@ -143,10 +142,20 @@ def analyze_gold_market():
                 status_event = "STILL_TRIGGERED" if order_status == "TRIGGERED" else "STILL_PENDING"
                 return active_order, status_event, spot_price, basis_current, rsi
 
-        # توليد صفقة جديدة
+        # -------------------------------------------------------------
+        # 3. إعدادات السكالبينج المحسنة (Tight Scalping Setup)
+        # -------------------------------------------------------------
         if ema20 > ema50 and rsi < 68 and (basis_expansion >= 0.10 or volume_surging):
-            proposed_entry = round(max(structural_swing_high, spot_price) + 1.20, 2)
-            sl_price = round(structural_swing_low - 0.50, 2)
+            proposed_entry = round(max(tight_swing_high, spot_price) + 0.40, 2)
+            # تقييد الستوب بحيث لا يتعدى 5.00$ ولا يقل عن 3.00$
+            calc_sl = round(tight_swing_low - 0.30, 2)
+            if proposed_entry - calc_sl > 5.00:
+                sl_price = round(proposed_entry - 5.00, 2)
+            elif proposed_entry - calc_sl < 3.00:
+                sl_price = round(proposed_entry - 3.00, 2)
+            else:
+                sl_price = calc_sl
+                
             risk_distance = proposed_entry - sl_price
             tp_price = round(proposed_entry + (risk_distance * 1.5), 2)
 
@@ -161,8 +170,16 @@ def analyze_gold_market():
             return active_order, "NEW_ORDER", spot_price, basis_current, rsi
 
         elif ema20 < ema50 and rsi > 32 and (basis_expansion <= -0.10 or volume_surging):
-            proposed_entry = round(min(structural_swing_low, spot_price) - 1.20, 2)
-            sl_price = round(structural_swing_high + 0.50, 2)
+            proposed_entry = round(min(tight_swing_low, spot_price) - 0.40, 2)
+            # تقييد الستوب بحيث لا يتعدى 5.00$ ولا يقل عن 3.00$
+            calc_sl = round(tight_swing_high + 0.30, 2)
+            if calc_sl - proposed_entry > 5.00:
+                sl_price = round(proposed_entry + 5.00, 2)
+            elif calc_sl - proposed_entry < 3.00:
+                sl_price = round(proposed_entry + 3.00, 2)
+            else:
+                sl_price = calc_sl
+
             risk_distance = sl_price - proposed_entry
             tp_price = round(proposed_entry - (risk_distance * 1.5), 2)
 
@@ -203,7 +220,7 @@ async def main_loop():
             emoji = "🟢" if order['type'] == "Buy Stop" else "🔴"
             
             if event in ["NEW_ORDER", "STILL_PENDING"]:
-                msg_header = "🚨 **إشارة جديدة (إغلاق M15)**" if event == "NEW_ORDER" else "⏳ **تذكير بالصفقة المعلقة**"
+                msg_header = "⚡️ **إشارة سكالبينج جديدة (M15)**" if event == "NEW_ORDER" else "⏳ **تذكير بالأمر المعلق**"
                 
                 msg = (
                     f"{msg_header}\n"
@@ -215,7 +232,7 @@ async def main_loop():
                     f"🎯 **سعر الدخول:** `{order['entry']}`\n"
                     f"🟢 **الهدف:** `{order['tp']}`\n"
                     f"🔴 **وقف الخسارة:** `{order['sl']}`\n\n"
-                    f"📌 *اضغط على الرقم لنسخه.*"
+                    f"📌 *صفقة سريعة بمخاطرة محددة.*"
                 )
                 try:
                     await bot.send_message(chat_id=chat_id, text=msg, parse_mode="Markdown")
@@ -224,7 +241,7 @@ async def main_loop():
 
             elif event == "JUST_TRIGGERED":
                 msg = (
-                    f"⚡️ **تم تفعيل الصفقة الآن!**\n\n"
+                    f"⚡️ **تم تفعيل صفقة السكالبينج!**\n\n"
                     f" Symbol: **XAUUSD** | Type: **{order['type']}**\n"
                     f"📍 **سعر التفعيل:** `{spot_price}`\n"
                     f"🟢 **الهدف:** `{order['tp']}`\n"
