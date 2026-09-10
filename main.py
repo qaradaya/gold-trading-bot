@@ -18,7 +18,6 @@ def run_web_server():
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
 
-# متغيرات النظام والتحكم
 active_order = None
 order_status = None 
 send_status_reports = True  
@@ -55,18 +54,17 @@ def calculate_ema(data, window):
         ema.append((price * weights[0]) + (ema[-1] * (1 - weights[0])))
     return ema
 
-# جلب السعر الفوري المباشر فقط
 def get_live_price():
     api_key = os.environ.get("TWELVE_DATA_API_KEY")
     if not api_key:
         return None
     try:
         url = f"https://api.twelvedata.com/price?symbol=XAU/USD&apikey={api_key}"
-        res = requests.get(url).json()
+        res = requests.get(url, timeout=4).json()
         if "price" in res:
             return float(res["price"])
     except Exception as e:
-        print(f"Live Price Fetch Error: {e}")
+        print(f"Live Price Error: {e}")
     return None
 
 def analyze_gold_market():
@@ -78,15 +76,14 @@ def analyze_gold_market():
 
     api_key = os.environ.get("TWELVE_DATA_API_KEY")
     if not api_key:
-        print("Error: TWELVE_DATA_API_KEY missing!")
         return None, "NO_KEY", 0, 0, 0
 
     try:
         url_spot = f"https://api.twelvedata.com/time_series?symbol=XAU/USD&interval=15min&outputsize=40&apikey={api_key}"
-        res_spot = requests.get(url_spot).json()
+        res_spot = requests.get(url_spot, timeout=6).json()
 
         url_futures = f"https://api.twelvedata.com/time_series?symbol=MGC&interval=15min&outputsize=40&apikey={api_key}"
-        res_futures = requests.get(url_futures).json()
+        res_futures = requests.get(url_futures, timeout=6).json()
 
         if "values" not in res_spot:
             return None, "API_ERROR", 0, 0, 0
@@ -125,19 +122,22 @@ def analyze_gold_market():
         tight_swing_high = max(spot_highs[-3:-1])
         tight_swing_low = min(spot_lows[-3:-1])
 
-        # إذا كان هناك أمر قائم، نتركه لحلقة المراقبة الفورية
         if active_order is not None:
             status_event = "STILL_TRIGGERED" if order_status == "TRIGGERED" else "STILL_PENDING"
             return active_order, status_event, spot_price, basis_current, rsi
 
-        # شروط النمط
-        rsi_buy_limit = 75 if strategy_mode == "flexible" else 68
-        rsi_sell_limit = 25 if strategy_mode == "flexible" else 32
+        # حد إضافي للسلامة لمنع الشراء وقت الانهيار المباشر
+        rsi_buy_max = 75 if strategy_mode == "flexible" else 68
+        rsi_buy_min = 30  # حظر الشراء لو الـ RSI حاد الهبوط تحت 30
+        
+        rsi_sell_min = 25 if strategy_mode == "flexible" else 32
+        rsi_sell_max = 70 # حظر البيع لو الـ RSI مرتفع جدا فوق 70
+
         basis_threshold = 0.05 if strategy_mode == "flexible" else 0.10
         max_risk = 10.00 if strategy_mode == "flexible" else 8.00
 
-        # توليد الشراء
-        if ema20 > ema50 and rsi < rsi_buy_limit and (basis_expansion >= basis_threshold or volume_surging):
+        # شرط الشراء
+        if ema20 > ema50 and (rsi_buy_min <= rsi < rsi_buy_max) and (basis_expansion >= basis_threshold or volume_surging):
             proposed_entry = round(min(max(tight_swing_high, spot_price) + 0.50, spot_price + 3.00), 2)
             sl_price = round(tight_swing_low - 0.50, 2)
             
@@ -149,8 +149,8 @@ def analyze_gold_market():
                     order_status = "PENDING"
                     return active_order, "NEW_ORDER", spot_price, basis_current, rsi
 
-        # توليد البيع
-        elif ema20 < ema50 and rsi > rsi_sell_limit and (basis_expansion <= -basis_threshold or volume_surging):
+        # شرط البيع
+        elif ema20 < ema50 and (rsi_sell_min < rsi <= rsi_sell_max) and (basis_expansion <= -basis_threshold or volume_surging):
             proposed_entry = round(max(min(tight_swing_low, spot_price) - 0.50, spot_price - 3.00), 2)
             sl_price = round(tight_swing_high + 0.50, 2)
 
@@ -168,44 +168,37 @@ def analyze_gold_market():
         print(f"Execution Error: {e}")
         return None, "ERROR", 0, 0, 0
 
-# حلقة مراقبة السعر اللحظية (تسمح بالإلغاء والتفعيل فوراً)
+# المراقبة الفورية للسعر
 async def fast_price_monitor_loop(bot: Bot, chat_id: str):
     global active_order, order_status
     while True:
         if active_order is not None:
             live_p = get_live_price()
             if live_p is not None:
-                # 1. حالة الأمر المعلق PENDING
                 if order_status == "PENDING":
-                    # إلغاء الشراء إذا ضرب الستوب قبل التفعيل
                     if active_order['type'] == 'Buy Stop' and live_p <= active_order['sl']:
                         active_order = None
                         order_status = None
                         msg = f"🚫 **تنبيه فوري: تم إلغاء صفقة الشراء المعلقة!**\nالسعر ضرب مستوى الستوب (`{live_p}`) قبل التفعيل."
                         await bot.send_message(chat_id=chat_id, text=msg, parse_mode="Markdown")
                     
-                    # إلغاء البيع إذا ضرب الستوب قبل التفعيل
                     elif active_order['type'] == 'Sell Stop' and live_p >= active_order['sl']:
                         active_order = None
                         order_status = None
                         msg = f"🚫 **تنبيه فوري: تم إلغاء صفقة البيع المعلقة!**\nالسعر ضرب مستوى الستوب (`{live_p}`) قبل التفعيل."
                         await bot.send_message(chat_id=chat_id, text=msg, parse_mode="Markdown")
 
-                    # تفعيل الشراء
                     elif active_order['type'] == 'Buy Stop' and live_p >= active_order['entry']:
                         order_status = "TRIGGERED"
                         msg = f"⚡️ **تم تفعيل صفقة الشراء فوراً!**\n📍 **سعر التفعيل الحقيقي:** `{live_p}`"
                         await bot.send_message(chat_id=chat_id, text=msg, parse_mode="Markdown")
 
-                    # تفعيل البيع
                     elif active_order['type'] == 'Sell Stop' and live_p <= active_order['entry']:
                         order_status = "TRIGGERED"
                         msg = f"⚡️ **تم تفعيل صفقة البيع فوراً!**\n📍 **سعر التفعيل الحقيقي:** `{live_p}`"
                         await bot.send_message(chat_id=chat_id, text=msg, parse_mode="Markdown")
 
-                # 2. حالة الأمر المفعل TRIGGERED
                 elif order_status == "TRIGGERED":
-                    # إغلاق الشراء على الهدف أو الستوب
                     if active_order['type'] == 'Buy Stop':
                         if live_p >= active_order['tp']:
                             active_order = None
@@ -218,7 +211,6 @@ async def fast_price_monitor_loop(bot: Bot, chat_id: str):
                             msg = f"🔴 **تم ضرب وقوف الخسارة.**\nسعر الإغلاق: `{live_p}`"
                             await bot.send_message(chat_id=chat_id, text=msg, parse_mode="Markdown")
 
-                    # إغلاق البيع على الهدف أو الستوب
                     elif active_order['type'] == 'Sell Stop':
                         if live_p <= active_order['tp']:
                             active_order = None
@@ -231,7 +223,7 @@ async def fast_price_monitor_loop(bot: Bot, chat_id: str):
                             msg = f"🔴 **تم ضرب وقوف الخسارة.**\nسعر الإغلاق: `{live_p}`"
                             await bot.send_message(chat_id=chat_id, text=msg, parse_mode="Markdown")
 
-        await asyncio.sleep(3)  # فحص السعر كل 3 ثوانٍ
+        await asyncio.sleep(4)
 
 async def market_scanner_loop(bot: Bot, chat_id: str):
     global send_status_reports
@@ -239,7 +231,8 @@ async def market_scanner_loop(bot: Bot, chat_id: str):
         await wait_for_next_check()
         order, event, spot_price, basis, rsi = analyze_gold_market()
         
-        if event == "NO_SIGNAL" and send_status_reports:
+        # إرسال التقرير الدوري دائماً عند تفعيل الخيار
+        if send_status_reports and (event == "NO_SIGNAL" or event in ["STILL_PENDING", "STILL_TRIGGERED"]):
             status_msg = (
                 f"🔍 **تقرير فحص السوق (نشط)**\n"
                 f"⏱ **التوقيت:** {time.strftime('%H:%M')} | **XAUUSD**\n\n"
@@ -331,9 +324,7 @@ def main():
     app_bot.add_handler(CallbackQueryHandler(button_callback))
 
     loop = asyncio.get_event_loop()
-    # تشغيل حلقة تحليل الشموع (كل 5 دقائق)
     loop.create_task(market_scanner_loop(app_bot.bot, chat_id))
-    # تشغيل حلقة المراقبة الفورية للسعر (كل 3 ثوانٍ)
     loop.create_task(fast_price_monitor_loop(app_bot.bot, chat_id))
 
     print("Bot fast-monitor active & listening...")
