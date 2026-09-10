@@ -11,7 +11,7 @@ app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "Pro Dynamic M15 Gold Bot is Live!"
+    return "Ultra-Filtered Pro Scalper M15 Gold Bot is Live!"
 
 def run_web_server():
     port = int(os.environ.get("PORT", 10000))
@@ -20,6 +20,7 @@ def run_web_server():
 active_order = None
 order_status = None 
 
+# التزامن مع رأس الدقيقة القابلة للقسمة على 5
 async def wait_for_next_5min_mark():
     while True:
         now = datetime.utcnow()
@@ -54,6 +55,7 @@ def calculate_ema(data, window):
 def analyze_gold_market():
     global active_order, order_status
     
+    # حظر التداول أثناء ساعة الإغلاق والتسوية اليومية (21:00 UTC)
     now_utc = datetime.utcnow()
     if now_utc.hour == 21:
         return None, "MARKET_CLOSED", 0, 0, 0
@@ -105,12 +107,12 @@ def analyze_gold_market():
         ema50 = calculate_ema(spot_closes, 50)[-1]
         rsi = calculate_rsi(spot_closes, 14)
 
-        # قمم وقيعان الشموع الـ 3 الأخيرة لإبقائها قريبة ولكن حقيقية
+        # قمم وقيعان الشموع الـ 3 الأخيرة
         tight_swing_high = max(spot_highs[-3:-1])
         tight_swing_low = min(spot_lows[-3:-1])
 
         # -------------------------------------------------------------
-        # 1. إدارة ومتابعة الصفقة الحالية
+        # 1. إدارة الصفقات الحالية والتفعيل والإلغاء
         # -------------------------------------------------------------
         if active_order is not None:
             # فحص التفعيل
@@ -135,7 +137,7 @@ def analyze_gold_market():
                         order_status = None
                         return None, "CLOSED", spot_price, basis_current, rsi
 
-            # إلغاء الصفقة المعلقة إذا هبط السعر وكسر الستوب قبل تفعيل الدخول (Invalidation Check)
+            # إلغاء الأمر المعلق إذا انكسر منطق الصفقة قبل التفعيل
             if order_status == "PENDING":
                 if active_order['type'] == 'Buy Stop' and (spot_price <= active_order['sl'] or ema20 < ema50):
                     active_order = None
@@ -151,43 +153,53 @@ def analyze_gold_market():
                 return active_order, status_event, spot_price, basis_current, rsi
 
         # -------------------------------------------------------------
-        # 2. توليد صفقة جديدة بشرط الستوب أسفل ذيل الشمعة تماماً
+        # 2. توليد صفقة جديدة (مع صمام أمان المسافات والمنطق)
         # -------------------------------------------------------------
         if ema20 > ema50 and rsi < 68 and (basis_expansion >= 0.10 or volume_surging):
-            proposed_entry = round(max(tight_swing_high, spot_price) + 0.50, 2)
-            # الستوب يتم وضعه دائماً تحت ذيل أ저قل شمعة من الشموع الأخيرة بنطاق أمان 0.50$
+            # الدخول فوق القمة بشرط ألا يبعد أكثر من 2.50$ عن السعر الحالي
+            proposed_entry = round(min(max(tight_swing_high, spot_price) + 0.50, spot_price + 2.50), 2)
             sl_price = round(tight_swing_low - 0.50, 2)
             
-            risk_distance = proposed_entry - sl_price
-            tp_price = round(proposed_entry + (risk_distance * 1.5), 2)
+            # شرط الأمان: الدخول > السعر الحالي > الستوب
+            if proposed_entry > spot_price > sl_price:
+                risk_distance = proposed_entry - sl_price
+                
+                # تصفية الصفقات: عدم قبول الستوب الأكبر من 6.00$
+                if risk_distance <= 6.00:
+                    tp_price = round(proposed_entry + (risk_distance * 1.5), 2)
 
-            active_order = {
-                "type": "Buy Stop",
-                "entry": proposed_entry,
-                "tp": tp_price,
-                "sl": sl_price,
-                "rsi": rsi
-            }
-            order_status = "PENDING"
-            return active_order, "NEW_ORDER", spot_price, basis_current, rsi
+                    active_order = {
+                        "type": "Buy Stop",
+                        "entry": proposed_entry,
+                        "tp": tp_price,
+                        "sl": sl_price,
+                        "rsi": rsi
+                    }
+                    order_status = "PENDING"
+                    return active_order, "NEW_ORDER", spot_price, basis_current, rsi
 
         elif ema20 < ema50 and rsi > 32 and (basis_expansion <= -0.10 or volume_surging):
-            proposed_entry = round(min(tight_swing_low, spot_price) - 0.50, 2)
-            # الستوب يتم وضعه دائماً أعلى ذيل أعلى شمعة من الشموع الأخيرة بنطاق أمان 0.50$
+            # الدخول تحت القاع بشرط ألا يبعد أكثر من 2.50$ عن السعر الحالي
+            proposed_entry = round(max(min(tight_swing_low, spot_price) - 0.50, spot_price - 2.50), 2)
             sl_price = round(tight_swing_high + 0.50, 2)
 
-            risk_distance = sl_price - proposed_entry
-            tp_price = round(proposed_entry - (risk_distance * 1.5), 2)
+            # شرط الأمان: الدخول < السعر الحالي < الستوب
+            if proposed_entry < spot_price < sl_price:
+                risk_distance = sl_price - proposed_entry
+                
+                # تصفية الصفقات: عدم قبول الستوب الأكبر من 6.00$
+                if risk_distance <= 6.00:
+                    tp_price = round(proposed_entry - (risk_distance * 1.5), 2)
 
-            active_order = {
-                "type": "Sell Stop",
-                "entry": proposed_entry,
-                "tp": tp_price,
-                "sl": sl_price,
-                "rsi": rsi
-            }
-            order_status = "PENDING"
-            return active_order, "NEW_ORDER", spot_price, basis_current, rsi
+                    active_order = {
+                        "type": "Sell Stop",
+                        "entry": proposed_entry,
+                        "tp": tp_price,
+                        "sl": sl_price,
+                        "rsi": rsi
+                    }
+                    order_status = "PENDING"
+                    return active_order, "NEW_ORDER", spot_price, basis_current, rsi
 
         return None, "NO_SIGNAL", spot_price, basis_current, rsi
 
@@ -228,7 +240,7 @@ async def main_loop():
             emoji = "🟢" if order['type'] == "Buy Stop" else "🔴"
             
             if event in ["NEW_ORDER", "STILL_PENDING"]:
-                msg_header = "🚨 **إشارة جديدة (محمية بالذيل)**" if event == "NEW_ORDER" else "⏳ **تذكير بالأمر المعلق**"
+                msg_header = "⚡️ **إشارة سكالبينج جديدة (M15)**" if event == "NEW_ORDER" else "⏳ **تذكير بالأمر المعلق**"
                 
                 msg = (
                     f"{msg_header}\n"
@@ -240,7 +252,7 @@ async def main_loop():
                     f"🎯 **سعر الدخول:** `{order['entry']}`\n"
                     f"🟢 **الهدف:** `{order['tp']}`\n"
                     f"🔴 **وقف الخسارة:** `{order['sl']}`\n\n"
-                    f"📌 *الستوب محمي بالكامل أسفل قاع الشمعة.*"
+                    f"📌 *صفقة سريعة بمخاطرة محددة ولتحركات محميّة.*"
                 )
                 try:
                     await bot.send_message(chat_id=chat_id, text=msg, parse_mode="Markdown")
@@ -249,7 +261,7 @@ async def main_loop():
 
             elif event == "JUST_TRIGGERED":
                 msg = (
-                    f"⚡️ **تم تفعيل الصفقة الآن!**\n\n"
+                    f"⚡️ **تم تفعيل صفقة السكالبينج!**\n\n"
                     f" Symbol: **XAUUSD** | Type: **{order['type']}**\n"
                     f"📍 **سعر التفعيل:** `{spot_price}`\n"
                     f"🟢 **الهدف:** `{order['tp']}`\n"
