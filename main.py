@@ -6,27 +6,29 @@ from datetime import datetime
 from threading import Thread
 from flask import Flask
 from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup, Update
-from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
+from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes, MessageHandler, filters
 
 app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "Pro Scalper M15 Gold Bot with Control Dashboard is Live!"
+    return "Pro Scalper M15 Gold Bot is Live!"
 
 def run_web_server():
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
 
-# متغيرات حالة التداول والتحكم
+# متغيرات النظام والتحكم
 active_order = None
 order_status = None 
-send_status_reports = True  # خيار التحكم في التقرير الدوري (مُفعل افتراضياً)
+send_status_reports = True  # تشغيل/إيقاف التقرير
+strategy_mode = "flexible"   # النمط: "strict" (مشدد) أو "flexible" (مرن)
 
-async def wait_for_next_5min_mark():
+# المزامنة مع نهاية شمعة الـ 15 دقيقة (أو الفحص كل 5 دقائق)
+async def wait_for_next_check():
     while True:
         now = datetime.utcnow()
-        if now.minute % 5 == 0 and now.second < 5:
+        if now.minute % 5 == 0 and now.second < 3:
             break
         await asyncio.sleep(1)
 
@@ -55,7 +57,7 @@ def calculate_ema(data, window):
     return ema
 
 def analyze_gold_market():
-    global active_order, order_status
+    global active_order, order_status, strategy_mode
     
     now_utc = datetime.utcnow()
     if now_utc.hour == 21:
@@ -111,7 +113,7 @@ def analyze_gold_market():
         tight_swing_high = max(spot_highs[-3:-1])
         tight_swing_low = min(spot_lows[-3:-1])
 
-        # إدارة الصفقات
+        # إدارة الأمر الحالي
         if active_order is not None:
             if order_status == "PENDING":
                 if active_order['type'] == 'Buy Stop' and spot_price >= active_order['entry']:
@@ -147,26 +149,33 @@ def analyze_gold_market():
                 status_event = "STILL_TRIGGERED" if order_status == "TRIGGERED" else "STILL_PENDING"
                 return active_order, status_event, spot_price, basis_current, rsi
 
-        # توليد الصفقات
-        if ema20 > ema50 and rsi < 68 and (basis_expansion >= 0.10 or volume_surging):
+        # شروط النمط المرن مقابل المشدد
+        rsi_buy_limit = 75 if strategy_mode == "flexible" else 68
+        rsi_sell_limit = 25 if strategy_mode == "flexible" else 32
+        basis_threshold = 0.05 if strategy_mode == "flexible" else 0.10
+        max_risk = 10.00 if strategy_mode == "flexible" else 8.00
+
+        # توليد إشارة الشراء
+        if ema20 > ema50 and rsi < rsi_buy_limit and (basis_expansion >= basis_threshold or volume_surging):
             proposed_entry = round(min(max(tight_swing_high, spot_price) + 0.50, spot_price + 3.00), 2)
             sl_price = round(tight_swing_low - 0.50, 2)
             
             if proposed_entry > spot_price > sl_price:
                 risk_distance = proposed_entry - sl_price
-                if risk_distance <= 8.00:
+                if risk_distance <= max_risk:
                     tp_price = round(proposed_entry + (risk_distance * 1.5), 2)
                     active_order = {"type": "Buy Stop", "entry": proposed_entry, "tp": tp_price, "sl": sl_price, "rsi": rsi}
                     order_status = "PENDING"
                     return active_order, "NEW_ORDER", spot_price, basis_current, rsi
 
-        elif ema20 < ema50 and rsi > 32 and (basis_expansion <= -0.10 or volume_surging):
+        # توليد إشارة البيع
+        elif ema20 < ema50 and rsi > rsi_sell_limit and (basis_expansion <= -basis_threshold or volume_surging):
             proposed_entry = round(max(min(tight_swing_low, spot_price) - 0.50, spot_price - 3.00), 2)
             sl_price = round(tight_swing_high + 0.50, 2)
 
             if proposed_entry < spot_price < sl_price:
                 risk_distance = sl_price - proposed_entry
-                if risk_distance <= 8.00:
+                if risk_distance <= max_risk:
                     tp_price = round(proposed_entry - (risk_distance * 1.5), 2)
                     active_order = {"type": "Sell Stop", "entry": proposed_entry, "tp": tp_price, "sl": sl_price, "rsi": rsi}
                     order_status = "PENDING"
@@ -178,34 +187,27 @@ def analyze_gold_market():
         print(f"Execution Error: {e}")
         return None, "ERROR", 0, 0, 0
 
-# -------------------------------------------------------------
-# دالة إرسال التنبيهات مع فحص خيار التقرير الدوري
-# -------------------------------------------------------------
-async def main_loop(bot: Bot, chat_id: str):
+async def market_scanner_loop(bot: Bot, chat_id: str):
     global send_status_reports
-    
     while True:
-        await wait_for_next_5min_mark()
-        
+        await wait_for_next_check()
         order, event, spot_price, basis, rsi = analyze_gold_market()
         
-        if event == "NO_SIGNAL":
-            # يتم الإرسال فقط إذا كان خيار التقرير مفعلاً
-            if send_status_reports:
-                status_msg = (
-                    f"🔍 **تقرير فحص السوق (نشط)**\n"
-                    f"⏱ **التوقيت:** {time.strftime('%H:%M')} | **XAUUSD**\n\n"
-                    f"📊 **سعر المنصة:** `{spot_price}`\n"
-                    f"📈 **RSI:** `{rsi}` | **الآجل/الفوري:** `{basis}`\n\n"
-                    f"⚙️ *البوت يعمل بنجاح ولا توجد إشارة حالياً.*"
-                )
-                try:
-                    await bot.send_message(chat_id=chat_id, text=status_msg, parse_mode="Markdown")
-                except Exception as e:
-                    print(f"Send Error: {e}")
+        if event == "NO_SIGNAL" and send_status_reports:
+            status_msg = (
+                f"🔍 **تقرير فحص السوق (نشط)**\n"
+                f"⏱ **التوقيت:** {time.strftime('%H:%M')} | **XAUUSD**\n\n"
+                f"📊 **سعر المنصة:** `{spot_price}`\n"
+                f"📈 **RSI:** `{rsi}` | **الآجل/الفوري:** `{basis}`\n\n"
+                f"⚙️ *البوت يعمل بنجاح ولا توجد إشارة جديدة.*"
+            )
+            try:
+                await bot.send_message(chat_id=chat_id, text=status_msg, parse_mode="Markdown")
+            except Exception as e:
+                print(f"Send Error: {e}")
 
         elif event == "CANCELLED_INVALIDATED":
-            msg = "🚫 **تم إلغاء الإشارة المعلقة تلقائياً** بسبب كسر مستوى وقف الخسارة قبل التفعيل."
+            msg = "🚫 **تم إلغاء الإشارة المعلقة تلقائياً** بسبب كسر مستوى الستوب أو تغير الاتجاه."
             try:
                 await bot.send_message(chat_id=chat_id, text=msg, parse_mode="Markdown")
             except Exception as e:
@@ -237,48 +239,52 @@ async def main_loop(bot: Bot, chat_id: str):
 
         await asyncio.sleep(10)
 
-# -------------------------------------------------------------
-# أجهزة التحكم عبر أزرار تليجرام (/settings)
-# -------------------------------------------------------------
-async def settings_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global send_status_reports
-    status_text = "مُفعل 🟢" if send_status_reports else "معطل 🔴"
-    button_text = "🔴 إيقاف التقرير الدوري" if send_status_reports else "🟢 تشغيل التقرير الدوري"
+def build_settings_keyboard():
+    global send_status_reports, strategy_mode
+    report_btn_text = "🔴 إيقاف التقرير الدوري" if send_status_reports else "🟢 تشغيل التقرير الدوري"
+    mode_btn_text = "🎯 النمط الحقيقي: مرن (إشارات أكثر)" if strategy_mode == "flexible" else "🛡 النمط الحقيقي: مشدد (إشارات أقل)"
     
-    keyboard = [[InlineKeyboardButton(button_text, callback_data="toggle_report")]]
-    reply_markup = InlineKeyboardMarkup(keyboard)
+    keyboard = [
+        [InlineKeyboardButton(report_btn_text, callback_data="toggle_report")],
+        [InlineKeyboardButton(mode_btn_text, callback_data="toggle_mode")]
+    ]
+    return InlineKeyboardMarkup(keyboard)
+
+async def handle_settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global send_status_reports, strategy_mode
+    rep_status = "مُفعل 🟢" if send_status_reports else "معطل 🔴"
+    mode_status = "مرن (كثافة إشارات أسرع) ⚡️" if strategy_mode == "flexible" else "مشدد (أعلى تصفية للسيولة) 🛡"
     
     await update.message.reply_text(
         f"⚙️ **لوحة تحكم إعدادات البوت**\n\n"
-        f"الحالة الحالية للتقرير الدوري كل 5 دقائق: **{status_text}**",
-        reply_markup=reply_markup,
+        f"▪️ التقرير الدوري كل 5 دقائق: **{rep_status}**\n"
+        f"▪️ نمط الفلترة والتداول: **{mode_status}**",
+        reply_markup=build_settings_keyboard(),
         parse_mode="Markdown"
     )
 
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global send_status_reports
+    global send_status_reports, strategy_mode
     query = update.callback_query
     await query.answer()
 
     if query.data == "toggle_report":
         send_status_reports = not send_status_reports
-        status_text = "مُفعل 🟢" if send_status_reports else "معطل 🔴"
-        button_text = "🔴 إيقاف التقرير الدوري" if send_status_reports else "🟢 تشغيل التقرير الدوري"
-        
-        keyboard = [[InlineKeyboardButton(button_text, callback_data="toggle_report")]]
-        reply_markup = InlineKeyboardMarkup(keyboard)
+    elif query.data == "toggle_mode":
+        strategy_mode = "strict" if strategy_mode == "flexible" else "flexible"
 
-        await query.edit_message_text(
-            f"⚙️ **لوحة تحكم إعدادات البوت**\n\n"
-            f"تم تغيير الحالة! التقرير الدوري الآن: **{status_text}**",
-            reply_markup=reply_markup,
-            parse_mode="Markdown"
-        )
+    rep_status = "مُفعل 🟢" if send_status_reports else "معطل 🔴"
+    mode_status = "مرن (كثافة إشارات أسرع) ⚡️" if strategy_mode == "flexible" else "مشدد (أعلى تصفية للسيولة) 🛡"
 
-# -------------------------------------------------------------
-# التشغيل الرئيسي
-# -------------------------------------------------------------
-async def main():
+    await query.edit_message_text(
+        f"⚙️ **لوحة تحكم إعدادات البوت**\n\n"
+        f"▪️ التقرير الدوري كل 5 دقائق: **{rep_status}**\n"
+        f"▪️ نمط الفلترة والتداول: **{mode_status}**",
+        reply_markup=build_settings_keyboard(),
+        parse_mode="Markdown"
+    )
+
+def main():
     token = os.environ.get("TELEGRAM_TOKEN")
     chat_id = os.environ.get("CHAT_ID")
     
@@ -286,26 +292,19 @@ async def main():
         print("Missing TELEGRAM_TOKEN or CHAT_ID environment variables!")
         return
 
-    application = Application.builder().token(token).build()
+    Thread(target=run_web_server, daemon=True).start()
 
-    # تسجيل الأوامر والأزرار
-    application.add_handler(CommandHandler("settings", settings_command))
-    application.add_handler(CallbackQueryHandler(button_callback))
+    app_bot = Application.builder().token(token).build()
 
-    bot = application.bot
-    
-    # تشغيل حلقة التحليل في الخلفية
-    asyncio.create_task(main_loop(bot, chat_id))
+    app_bot.add_handler(CommandHandler("settings", handle_settings))
+    app_bot.add_handler(MessageHandler(filters.Regex(r'(?i)^settings$'), handle_settings))
+    app_bot.add_handler(CallbackQueryHandler(button_callback))
 
-    # تشغيل الاستماع لأوامر تليجرام
-    await application.initialize()
-    await application.start()
-    await application.updater.start_polling()
-    
-    # الحفاظ على تشغيل التطبيق
-    while True:
-        await asyncio.sleep(3600)
+    loop = asyncio.get_event_loop()
+    loop.create_task(market_scanner_loop(app_bot.bot, chat_id))
+
+    print("Bot control panel updated & listening...")
+    app_bot.run_polling()
 
 if __name__ == "__main__":
-    Thread(target=run_web_server, daemon=True).start()
-    asyncio.run(main())
+    main()
