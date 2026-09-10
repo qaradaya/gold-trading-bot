@@ -11,7 +11,7 @@ app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "Pro Scalper M15 Gold Bot is Live!"
+    return "Pro Dynamic M15 Gold Bot is Live!"
 
 def run_web_server():
     port = int(os.environ.get("PORT", 10000))
@@ -105,12 +105,15 @@ def analyze_gold_market():
         ema50 = calculate_ema(spot_closes, 50)[-1]
         rsi = calculate_rsi(spot_closes, 14)
 
-        # الاعتماد على قمم وقيعان أقرب (آخر 3 شموع بدلاً من 5)
+        # قمم وقيعان الشموع الـ 3 الأخيرة لإبقائها قريبة ولكن حقيقية
         tight_swing_high = max(spot_highs[-3:-1])
         tight_swing_low = min(spot_lows[-3:-1])
 
-        # إدارة الصفقة الحالية
+        # -------------------------------------------------------------
+        # 1. إدارة ومتابعة الصفقة الحالية
+        # -------------------------------------------------------------
         if active_order is not None:
+            # فحص التفعيل
             if order_status == "PENDING":
                 if active_order['type'] == 'Buy Stop' and spot_price >= active_order['entry']:
                     order_status = "TRIGGERED"
@@ -119,43 +122,42 @@ def analyze_gold_market():
                     order_status = "TRIGGERED"
                     return active_order, "JUST_TRIGGERED", spot_price, basis_current, rsi
 
-            if active_order['type'] == 'Buy Stop':
-                if spot_price >= active_order['tp'] or spot_price <= active_order['sl']:
-                    active_order = None
-                    order_status = None
-                    return None, "CLOSED", spot_price, basis_current, rsi
-            elif active_order['type'] == 'Sell Stop':
-                if spot_price <= active_order['tp'] or spot_price >= active_order['sl']:
-                    active_order = None
-                    order_status = None
-                    return None, "CLOSED", spot_price, basis_current, rsi
+            # فحص إغلاق الصفقة المفعلة (TP / SL)
+            if order_status == "TRIGGERED":
+                if active_order['type'] == 'Buy Stop':
+                    if spot_price >= active_order['tp'] or spot_price <= active_order['sl']:
+                        active_order = None
+                        order_status = None
+                        return None, "CLOSED", spot_price, basis_current, rsi
+                elif active_order['type'] == 'Sell Stop':
+                    if spot_price <= active_order['tp'] or spot_price >= active_order['sl']:
+                        active_order = None
+                        order_status = None
+                        return None, "CLOSED", spot_price, basis_current, rsi
 
+            # إلغاء الصفقة المعلقة إذا هبط السعر وكسر الستوب قبل تفعيل الدخول (Invalidation Check)
             if order_status == "PENDING":
-                if active_order['type'] == 'Buy Stop' and ema20 < ema50:
+                if active_order['type'] == 'Buy Stop' and (spot_price <= active_order['sl'] or ema20 < ema50):
                     active_order = None
                     order_status = None
-                elif active_order['type'] == 'Sell Stop' and ema20 > ema50:
+                    return None, "CANCELLED_INVALIDATED", spot_price, basis_current, rsi
+                elif active_order['type'] == 'Sell Stop' and (spot_price >= active_order['sl'] or ema20 > ema50):
                     active_order = None
                     order_status = None
+                    return None, "CANCELLED_INVALIDATED", spot_price, basis_current, rsi
 
             if active_order is not None:
                 status_event = "STILL_TRIGGERED" if order_status == "TRIGGERED" else "STILL_PENDING"
                 return active_order, status_event, spot_price, basis_current, rsi
 
         # -------------------------------------------------------------
-        # 3. إعدادات السكالبينج المحسنة (Tight Scalping Setup)
+        # 2. توليد صفقة جديدة بشرط الستوب أسفل ذيل الشمعة تماماً
         # -------------------------------------------------------------
         if ema20 > ema50 and rsi < 68 and (basis_expansion >= 0.10 or volume_surging):
-            proposed_entry = round(max(tight_swing_high, spot_price) + 0.40, 2)
-            # تقييد الستوب بحيث لا يتعدى 5.00$ ولا يقل عن 3.00$
-            calc_sl = round(tight_swing_low - 0.30, 2)
-            if proposed_entry - calc_sl > 5.00:
-                sl_price = round(proposed_entry - 5.00, 2)
-            elif proposed_entry - calc_sl < 3.00:
-                sl_price = round(proposed_entry - 3.00, 2)
-            else:
-                sl_price = calc_sl
-                
+            proposed_entry = round(max(tight_swing_high, spot_price) + 0.50, 2)
+            # الستوب يتم وضعه دائماً تحت ذيل أ저قل شمعة من الشموع الأخيرة بنطاق أمان 0.50$
+            sl_price = round(tight_swing_low - 0.50, 2)
+            
             risk_distance = proposed_entry - sl_price
             tp_price = round(proposed_entry + (risk_distance * 1.5), 2)
 
@@ -170,15 +172,9 @@ def analyze_gold_market():
             return active_order, "NEW_ORDER", spot_price, basis_current, rsi
 
         elif ema20 < ema50 and rsi > 32 and (basis_expansion <= -0.10 or volume_surging):
-            proposed_entry = round(min(tight_swing_low, spot_price) - 0.40, 2)
-            # تقييد الستوب بحيث لا يتعدى 5.00$ ولا يقل عن 3.00$
-            calc_sl = round(tight_swing_high + 0.30, 2)
-            if calc_sl - proposed_entry > 5.00:
-                sl_price = round(proposed_entry + 5.00, 2)
-            elif calc_sl - proposed_entry < 3.00:
-                sl_price = round(proposed_entry + 3.00, 2)
-            else:
-                sl_price = calc_sl
+            proposed_entry = round(min(tight_swing_low, spot_price) - 0.50, 2)
+            # الستوب يتم وضعه دائماً أعلى ذيل أعلى شمعة من الشموع الأخيرة بنطاق أمان 0.50$
+            sl_price = round(tight_swing_high + 0.50, 2)
 
             risk_distance = sl_price - proposed_entry
             tp_price = round(proposed_entry - (risk_distance * 1.5), 2)
@@ -216,11 +212,23 @@ async def main_loop():
         
         if event == "MARKET_CLOSED":
             print(f"[{time.strftime('%H:%M:%S')}] Market closed for settlement.")
+            
+        elif event == "CANCELLED_INVALIDATED":
+            msg = (
+                f"🚫 **تم إلغاء الإشارة المعلقة تلقائياً**\n\n"
+                f"السبب: تجاوز السعر مستوى وقف الخسارة قبل تفعيل الصفقة، مما أبطل الفكرة الفنية.\n"
+                f"⏳ *البوت بانتظار تشكل فرصة جديدة...*"
+            )
+            try:
+                await bot.send_message(chat_id=chat_id, text=msg, parse_mode="Markdown")
+            except Exception as e:
+                print(f"Send Error: {e}")
+                
         elif order:
             emoji = "🟢" if order['type'] == "Buy Stop" else "🔴"
             
             if event in ["NEW_ORDER", "STILL_PENDING"]:
-                msg_header = "⚡️ **إشارة سكالبينج جديدة (M15)**" if event == "NEW_ORDER" else "⏳ **تذكير بالأمر المعلق**"
+                msg_header = "🚨 **إشارة جديدة (محمية بالذيل)**" if event == "NEW_ORDER" else "⏳ **تذكير بالأمر المعلق**"
                 
                 msg = (
                     f"{msg_header}\n"
@@ -232,7 +240,7 @@ async def main_loop():
                     f"🎯 **سعر الدخول:** `{order['entry']}`\n"
                     f"🟢 **الهدف:** `{order['tp']}`\n"
                     f"🔴 **وقف الخسارة:** `{order['sl']}`\n\n"
-                    f"📌 *صفقة سريعة بمخاطرة محددة.*"
+                    f"📌 *الستوب محمي بالكامل أسفل قاع الشمعة.*"
                 )
                 try:
                     await bot.send_message(chat_id=chat_id, text=msg, parse_mode="Markdown")
@@ -241,7 +249,7 @@ async def main_loop():
 
             elif event == "JUST_TRIGGERED":
                 msg = (
-                    f"⚡️ **تم تفعيل صفقة السكالبينج!**\n\n"
+                    f"⚡️ **تم تفعيل الصفقة الآن!**\n\n"
                     f" Symbol: **XAUUSD** | Type: **{order['type']}**\n"
                     f"📍 **سعر التفعيل:** `{spot_price}`\n"
                     f"🟢 **الهدف:** `{order['tp']}`\n"
