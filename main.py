@@ -60,7 +60,7 @@ def get_live_price():
         return None
     try:
         url = f"https://api.twelvedata.com/price?symbol=XAU/USD&apikey={api_key}"
-        res = requests.get(url, timeout=4).json()
+        res = requests.get(url, timeout=5).json()
         if "price" in res:
             return float(res["price"])
     except Exception as e:
@@ -80,10 +80,10 @@ def analyze_gold_market():
 
     try:
         url_spot = f"https://api.twelvedata.com/time_series?symbol=XAU/USD&interval=15min&outputsize=40&apikey={api_key}"
-        res_spot = requests.get(url_spot, timeout=6).json()
+        res_spot = requests.get(url_spot, timeout=8).json()
 
         url_futures = f"https://api.twelvedata.com/time_series?symbol=MGC&interval=15min&outputsize=40&apikey={api_key}"
-        res_futures = requests.get(url_futures, timeout=6).json()
+        res_futures = requests.get(url_futures, timeout=8).json()
 
         if "values" not in res_spot:
             return None, "API_ERROR", 0, 0, 0
@@ -126,17 +126,14 @@ def analyze_gold_market():
             status_event = "STILL_TRIGGERED" if order_status == "TRIGGERED" else "STILL_PENDING"
             return active_order, status_event, spot_price, basis_current, rsi
 
-        # حد إضافي للسلامة لمنع الشراء وقت الانهيار المباشر
         rsi_buy_max = 75 if strategy_mode == "flexible" else 68
-        rsi_buy_min = 30  # حظر الشراء لو الـ RSI حاد الهبوط تحت 30
-        
+        rsi_buy_min = 30  
         rsi_sell_min = 25 if strategy_mode == "flexible" else 32
-        rsi_sell_max = 70 # حظر البيع لو الـ RSI مرتفع جدا فوق 70
+        rsi_sell_max = 70 
 
         basis_threshold = 0.05 if strategy_mode == "flexible" else 0.10
         max_risk = 10.00 if strategy_mode == "flexible" else 8.00
 
-        # شرط الشراء
         if ema20 > ema50 and (rsi_buy_min <= rsi < rsi_buy_max) and (basis_expansion >= basis_threshold or volume_surging):
             proposed_entry = round(min(max(tight_swing_high, spot_price) + 0.50, spot_price + 3.00), 2)
             sl_price = round(tight_swing_low - 0.50, 2)
@@ -149,7 +146,6 @@ def analyze_gold_market():
                     order_status = "PENDING"
                     return active_order, "NEW_ORDER", spot_price, basis_current, rsi
 
-        # شرط البيع
         elif ema20 < ema50 and (rsi_sell_min < rsi <= rsi_sell_max) and (basis_expansion <= -basis_threshold or volume_surging):
             proposed_entry = round(max(min(tight_swing_low, spot_price) - 0.50, spot_price - 3.00), 2)
             sl_price = round(tight_swing_high + 0.50, 2)
@@ -168,97 +164,95 @@ def analyze_gold_market():
         print(f"Execution Error: {e}")
         return None, "ERROR", 0, 0, 0
 
-# المراقبة الفورية للسعر
 async def fast_price_monitor_loop(bot: Bot, chat_id: str):
     global active_order, order_status
     while True:
-        if active_order is not None:
-            live_p = get_live_price()
-            if live_p is not None:
-                if order_status == "PENDING":
-                    if active_order['type'] == 'Buy Stop' and live_p <= active_order['sl']:
-                        active_order = None
-                        order_status = None
-                        msg = f"🚫 **تنبيه فوري: تم إلغاء صفقة الشراء المعلقة!**\nالسعر ضرب مستوى الستوب (`{live_p}`) قبل التفعيل."
-                        await bot.send_message(chat_id=chat_id, text=msg, parse_mode="Markdown")
-                    
-                    elif active_order['type'] == 'Sell Stop' and live_p >= active_order['sl']:
-                        active_order = None
-                        order_status = None
-                        msg = f"🚫 **تنبيه فوري: تم إلغاء صفقة البيع المعلقة!**\nالسعر ضرب مستوى الستوب (`{live_p}`) قبل التفعيل."
-                        await bot.send_message(chat_id=chat_id, text=msg, parse_mode="Markdown")
-
-                    elif active_order['type'] == 'Buy Stop' and live_p >= active_order['entry']:
-                        order_status = "TRIGGERED"
-                        msg = f"⚡️ **تم تفعيل صفقة الشراء فوراً!**\n📍 **سعر التفعيل الحقيقي:** `{live_p}`"
-                        await bot.send_message(chat_id=chat_id, text=msg, parse_mode="Markdown")
-
-                    elif active_order['type'] == 'Sell Stop' and live_p <= active_order['entry']:
-                        order_status = "TRIGGERED"
-                        msg = f"⚡️ **تم تفعيل صفقة البيع فوراً!**\n📍 **سعر التفعيل الحقيقي:** `{live_p}`"
-                        await bot.send_message(chat_id=chat_id, text=msg, parse_mode="Markdown")
-
-                elif order_status == "TRIGGERED":
-                    if active_order['type'] == 'Buy Stop':
-                        if live_p >= active_order['tp']:
+        try:
+            if active_order is not None:
+                live_p = get_live_price()
+                if live_p is not None:
+                    if order_status == "PENDING":
+                        if active_order['type'] == 'Buy Stop' and live_p <= active_order['sl']:
                             active_order = None
                             order_status = None
-                            msg = f"🎯 **تم تحقيق الهدف بنجاح!**\nسعر الإغلاق: `{live_p}`"
+                            msg = f"🚫 **تنبيه فوري: تم إلغاء صفقة الشراء المعلقة!**\nالسعر ضرب مستوى الستوب (`{live_p}`) قبل التفعيل."
                             await bot.send_message(chat_id=chat_id, text=msg, parse_mode="Markdown")
-                        elif live_p <= active_order['sl']:
+                        
+                        elif active_order['type'] == 'Sell Stop' and live_p >= active_order['sl']:
                             active_order = None
                             order_status = None
-                            msg = f"🔴 **تم ضرب وقوف الخسارة.**\nسعر الإغلاق: `{live_p}`"
+                            msg = f"🚫 **تنبيه فوري: تم إلغاء صفقة البيع المعلقة!**\nالسعر ضرب مستوى الستوب (`{live_p}`) قبل التفعيل."
                             await bot.send_message(chat_id=chat_id, text=msg, parse_mode="Markdown")
 
-                    elif active_order['type'] == 'Sell Stop':
-                        if live_p <= active_order['tp']:
-                            active_order = None
-                            order_status = None
-                            msg = f"🎯 **تم تحقيق الهدف بنجاح!**\nسعر الإغلاق: `{live_p}`"
-                            await bot.send_message(chat_id=chat_id, text=msg, parse_mode="Markdown")
-                        elif live_p >= active_order['sl']:
-                            active_order = None
-                            order_status = None
-                            msg = f"🔴 **تم ضرب وقوف الخسارة.**\nسعر الإغلاق: `{live_p}`"
+                        elif active_order['type'] == 'Buy Stop' and live_p >= active_order['entry']:
+                            order_status = "TRIGGERED"
+                            msg = f"⚡️ **تم تفعيل صفقة الشراء فوراً!**\n📍 **سعر التفعيل الحقيقي:** `{live_p}`"
                             await bot.send_message(chat_id=chat_id, text=msg, parse_mode="Markdown")
 
-        await asyncio.sleep(4)
+                        elif active_order['type'] == 'Sell Stop' and live_p <= active_order['entry']:
+                            order_status = "TRIGGERED"
+                            msg = f"⚡️ **تم تفعيل صفقة البيع فوراً!**\n📍 **سعر التفعيل الحقيقي:** `{live_p}`"
+                            await bot.send_message(chat_id=chat_id, text=msg, parse_mode="Markdown")
+
+                    elif order_status == "TRIGGERED":
+                        if active_order['type'] == 'Buy Stop':
+                            if live_p >= active_order['tp']:
+                                active_order = None
+                                order_status = None
+                                msg = f"🎯 **تم تحقيق الهدف بنجاح!**\nسعر الإغلاق: `{live_p}`"
+                                await bot.send_message(chat_id=chat_id, text=msg, parse_mode="Markdown")
+                            elif live_p <= active_order['sl']:
+                                active_order = None
+                                order_status = None
+                                msg = f"🔴 **تم ضرب وقوف الخسارة.**\nسعر الإغلاق: `{live_p}`"
+                                await bot.send_message(chat_id=chat_id, text=msg, parse_mode="Markdown")
+
+                        elif active_order['type'] == 'Sell Stop':
+                            if live_p <= active_order['tp']:
+                                active_order = None
+                                order_status = None
+                                msg = f"🎯 **تم تحقيق الهدف بنجاح!**\nسعر الإغلاق: `{live_p}`"
+                                await bot.send_message(chat_id=chat_id, text=msg, parse_mode="Markdown")
+                            elif live_p >= active_order['sl']:
+                                active_order = None
+                                order_status = None
+                                msg = f"🔴 **تم ضرب وقوف الخسارة.**\nسعر الإغلاق: `{live_p}`"
+                                await bot.send_message(chat_id=chat_id, text=msg, parse_mode="Markdown")
+        except Exception as e:
+            print(f"Fast Monitor Exception: {e}")
+
+        await asyncio.sleep(8)
 
 async def market_scanner_loop(bot: Bot, chat_id: str):
     global send_status_reports
     while True:
-        await wait_for_next_check()
-        order, event, spot_price, basis, rsi = analyze_gold_market()
-        
-        # إرسال التقرير الدوري دائماً عند تفعيل الخيار
-        if send_status_reports and (event == "NO_SIGNAL" or event in ["STILL_PENDING", "STILL_TRIGGERED"]):
-            status_msg = (
-                f"🔍 **تقرير فحص السوق (نشط)**\n"
-                f"⏱ **التوقيت:** {time.strftime('%H:%M')} | **XAUUSD**\n\n"
-                f"📊 **سعر المنصة:** `{spot_price}`\n"
-                f"📈 **RSI:** `{rsi}` | **الآجل/الفوري:** `{basis}`\n\n"
-                f"⚙️ *البوت يعمل بنجاح ولا توجد إشارة جديدة.*"
-            )
-            try:
+        try:
+            await wait_for_next_check()
+            order, event, spot_price, basis, rsi = analyze_gold_market()
+            
+            if send_status_reports and (event == "NO_SIGNAL" or event in ["STILL_PENDING", "STILL_TRIGGERED"]):
+                status_msg = (
+                    f"🔍 **تقرير فحص السوق (نشط)**\n"
+                    f"⏱ **التوقيت:** {time.strftime('%H:%M')} | **XAUUSD**\n\n"
+                    f"📊 **سعر المنصة:** `{spot_price}`\n"
+                    f"📈 **RSI:** `{rsi}` | **الآجل/الفوري:** `{basis}`\n\n"
+                    f"⚙️ *البوت يعمل بنجاح ولا توجد إشارة جديدة.*"
+                )
                 await bot.send_message(chat_id=chat_id, text=status_msg, parse_mode="Markdown")
-            except Exception as e:
-                print(f"Send Error: {e}")
 
-        elif order and event == "NEW_ORDER":
-            emoji = "🟢" if order['type'] == "Buy Stop" else "🔴"
-            msg = (
-                f"⚡️ **إشارة سكالبينج جديدة (M15)**\n"
-                f"⏱ **التوقيت:** {time.strftime('%H:%M')} | **XAUUSD**\n\n"
-                f"📊 **السعر:** `{spot_price}` | **RSI:** `{rsi}`\n"
-                f"{emoji} **النوع:** {order['type']}\n"
-                f"🎯 **الدخول:** `{order['entry']}`\n"
-                f"🟢 **الهدف:** `{order['tp']}` | 🔴 **الستوب:** `{order['sl']}`"
-            )
-            try:
+            elif order and event == "NEW_ORDER":
+                emoji = "🟢" if order['type'] == "Buy Stop" else "🔴"
+                msg = (
+                    f"⚡️ **إشارة سكالبينج جديدة (M15)**\n"
+                    f"⏱ **التوقيت:** {time.strftime('%H:%M')} | **XAUUSD**\n\n"
+                    f"📊 **السعر:** `{spot_price}` | **RSI:** `{rsi}`\n"
+                    f"{emoji} **النوع:** {order['type']}\n"
+                    f"🎯 **الدخول:** `{order['entry']}`\n"
+                    f"🟢 **الهدف:** `{order['tp']}` | 🔴 **الستوب:** `{order['sl']}`"
+                )
                 await bot.send_message(chat_id=chat_id, text=msg, parse_mode="Markdown")
-            except Exception as e:
-                print(f"Send Error: {e}")
+        except Exception as e:
+            print(f"Market Scanner Exception: {e}")
 
         await asyncio.sleep(10)
 
