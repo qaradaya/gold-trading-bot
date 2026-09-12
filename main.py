@@ -1,11 +1,20 @@
 import os
 import time
 import requests
-from datetime import datetime, timedelta
+from datetime import datetime
 from flask import Flask
 import threading
-import telebot
-from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
+
+# استيراد مكتبة تليجرام بالطريقة الصحيحة المتوافقة مع Render
+try:
+    import telebot
+    from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
+except ImportError:
+    import sys
+    import subprocess
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "pyTelegramBotAPI"])
+    import telebot
+    from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
 
 # ================= ================= =================
 # 1. الإعدادات والمتغيرات العامة (Bot Configuration)
@@ -37,11 +46,11 @@ def run_flask():
     app.run(host='0.0.0.0', port=10000)
 
 # ================= ================= =================
-# 3. فحص عطلة نهاية الأسبوع الأخبار (Market Status & News)
+# 3. فحص عطلة نهاية الأسبوع والأخبار
 # ================= ================= =================
 
 def is_market_closed():
-    """فحص ما إذا كان اليوم عطلة نهاية الأسبوع (السبت=5، الأحد=6)"""
+    """حظر التداول يومي السبت والأحد"""
     weekday = datetime.utcnow().weekday()
     return weekday in [5, 6]
 
@@ -111,12 +120,10 @@ def calculate_ema(prices, period):
     return round(ema, 2)
 
 def analyze_gold_market():
-    # حظر التداول نهائياً في عطلة نهاية الأسبوع
     if is_market_closed():
         print("⏸️ السوق مغلق (عطلة نهاية الأسبوع). لا توجد عمليات تحليل.")
         return None
 
-    # فحص فلتر الأخبار
     has_news, news_title = is_high_impact_news_near()
     if has_news:
         print(f"⚠️ متوقف بسبب خبر: {news_title}")
@@ -164,7 +171,7 @@ def analyze_gold_market():
     return None
 
 # ================= ================= =================
-# 6. لوحة الإعدادات الجديدة (Telegram Commands)
+# 6. لوحة الإعدادات وتليجرام (Telegram Commands)
 # ================= ================= =================
 
 def build_settings_keyboard():
