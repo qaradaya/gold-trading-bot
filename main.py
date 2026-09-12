@@ -5,7 +5,7 @@ from datetime import datetime
 from flask import Flask
 import threading
 
-# 1. المكاتب مع المعالجة التلقائية للتثبيت
+# 1. تثبيت واستيراد المكتبة
 try:
     import telebot
     from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
@@ -17,20 +17,13 @@ except ImportError:
     from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
 
 # ================= ================= =================
-# 2. الإعدادات والتوكين (ضع التوكين والـ ID الخاصين بك هنا بين التنصيص إذا لم تضعهم في Render)
+# 2. البيانات المتغيرة
 # ================= ================= =================
 
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 TWELVE_DATA_API_KEY = os.environ.get("TWELVE_DATA_API_KEY")
 
-# تحقق أمني لمنع الـ Crash إذا كان التوكين مفقوداً
-if not TELEGRAM_BOT_TOKEN or ":" not in TELEGRAM_BOT_TOKEN:
-    print("⚠️ تحذير: لم يتم العثور على TELEGRAM_BOT_TOKEN صحيح في Environment Variables!")
-    # يمكنك وضع التوكين الخاص بك بدلاً من التمرير للتجربة السريعة:
-    # TELEGRAM_BOT_TOKEN = "ضع_التوكين_هنا"
-
-bot = telebot.TeleBot(TELEGRAM_BOT_TOKEN) if TELEGRAM_BOT_TOKEN and ":" in TELEGRAM_BOT_TOKEN else None
 app = Flask(__name__)
 
 USER_SETTINGS = {
@@ -39,6 +32,14 @@ USER_SETTINGS = {
     "news_filter_active": True,
     "send_reports": True
 }
+
+# إنشاء كائن البوت مع التحقق
+bot = None
+if TELEGRAM_BOT_TOKEN:
+    try:
+        bot = telebot.TeleBot(TELEGRAM_BOT_TOKEN)
+    except Exception as e:
+        print(f"Error initializing bot: {e}")
 
 # ================= ================= =================
 # 3. خادم الإيقاظ (Flask Server)
@@ -56,7 +57,6 @@ def run_flask():
 # ================= ================= =================
 
 def is_market_closed():
-    """حظر التداول يومي السبت والأحد"""
     weekday = datetime.utcnow().weekday()
     return weekday in [5, 6]
 
@@ -71,9 +71,11 @@ def is_high_impact_news_near():
             now = datetime.utcnow()
             for event in events:
                 if event.get("currency") == "USD" and event.get("impact") == "High":
-                    event_time = datetime.fromisoformat(event["date"].replace("Z", "+00:00")).replace(tzinfo=None)
-                    if abs((event_time - now).total_seconds()) <= 1800:
-                        return True, f"{event.get('title')} ({event_time.strftime('%H:%M')} UTC)"
+                    event_time_str = event.get("date", "").replace("Z", "+00:00")
+                    if event_time_str:
+                        event_time = datetime.fromisoformat(event_time_str).replace(tzinfo=None)
+                        if abs((event_time - now).total_seconds()) <= 1800:
+                            return True, f"{event.get('title')} ({event_time.strftime('%H:%M')} UTC)"
     except Exception as e:
         print(f"News API Error: {e}")
     return False, ""
@@ -136,6 +138,7 @@ def analyze_gold_market():
         return None
 
     if not TWELVE_DATA_API_KEY:
+        print("⚠️ مفتاح TwelveData API غير مضاف!")
         return None
 
     url = f"https://api.twelvedata.com/time_series?symbol=XAU/USD&interval=15min&outputsize=60&apikey={TWELVE_DATA_API_KEY}"
@@ -180,7 +183,7 @@ def analyze_gold_market():
     return None
 
 # ================= ================= =================
-# 7. لوحة التحكم بالأزرار والتليجرام (Telegram Handlers)
+# 7. لوحة التحكم بالأزرار والتليجرام
 # ================= ================= =================
 
 def build_settings_keyboard():
@@ -229,7 +232,7 @@ if bot:
 
         try:
             bot.edit_message_reply_markup(call.message.chat.id, call.message.message_id, reply_markup=build_settings_keyboard())
-        except:
+        except Exception:
             pass
 
 # ================= ================= =================
@@ -258,7 +261,18 @@ def market_scanner_loop():
         time.sleep(300)
 
 if __name__ == "__main__":
+    # تشغيل Flask ومراقبة الأسواق في threads خلفية
     threading.Thread(target=run_flask, daemon=True).start()
     threading.Thread(target=market_scanner_loop, daemon=True).start()
+    
+    # تشغيل البوت مع خاصية التجاوز لحماية عدم السقوط عند إعادة التشغيل
     if bot:
-        bot.infinity_polling()
+        try:
+            bot.remove_webhook()
+        except Exception:
+            pass
+        bot.infinity_polling(skip_pending=True)
+    else:
+        # إبقاء التطبيق شغالاً لمنع الخروج مع خطأ حتى لو لم يتوفر التوكين لحظياً
+        while True:
+            time.sleep(3600)
