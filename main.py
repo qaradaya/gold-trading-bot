@@ -18,17 +18,15 @@ TWELVE_DATA_API_KEY = os.environ.get("TWELVE_DATA_API_KEY", "YOUR_TWELVEDATA_KEY
 bot = telebot.TeleBot(TELEGRAM_BOT_TOKEN)
 app = Flask(__name__)
 
-# إعدادات التداول الافتراضية
 USER_SETTINGS = {
-    "account_balance_cents": 200000, # 200,000 سنت (يعادل 2000$)
-    "risk_percentage": 0.5,           # نسبة المخاطرة 0.5% لكل صفقة
-    "news_filter_active": True,       # تفعيل فلتر الأخبار
-    "send_reports": True,            # إرسال التقارير الدورية
-    "strategy_mode": "strict"         # نمط الاستراتيجية (strict / flexible)
+    "account_balance_cents": 200000,
+    "risk_percentage": 0.5,
+    "news_filter_active": True,
+    "send_reports": True
 }
 
 # ================= ================= =================
-# 2. خادم الإيقاظ لمنع النوم (Flask & Keep-Alive)
+# 2. خادم الإيقاظ (Flask Server)
 # ================= ================= =================
 
 @app.route('/')
@@ -39,14 +37,17 @@ def run_flask():
     app.run(host='0.0.0.0', port=10000)
 
 # ================= ================= =================
-# 3. فلتر الأخبار الاقتصادية (Economic News Filter)
+# 3. فحص عطلة نهاية الأسبوع الأخبار (Market Status & News)
 # ================= ================= =================
 
+def is_market_closed():
+    """فحص ما إذا كان اليوم عطلة نهاية الأسبوع (السبت=5، الأحد=6)"""
+    weekday = datetime.utcnow().weekday()
+    return weekday in [5, 6]
+
 def is_high_impact_news_near():
-    """فحص وجود أخبار عالية التأثير على USD قبل أو بعد 30 دقيقة"""
     if not USER_SETTINGS["news_filter_active"]:
         return False, ""
-    
     try:
         url = "https://nfp.ourforecast.com/api/v1/events"
         response = requests.get(url, timeout=5)
@@ -59,42 +60,30 @@ def is_high_impact_news_near():
                     if abs((event_time - now).total_seconds()) <= 1800:
                         return True, f"{event.get('title')} ({event_time.strftime('%H:%M')} UTC)"
     except Exception as e:
-        print(f"Error checking news API: {e}")
-    
+        print(f"News API Error: {e}")
     return False, ""
 
 # ================= ================= =================
-# 4. محرك حساب اللوت الدقيق (Lot Calculator)
+# 4. حساب اللوت الذكي (Lot Calculator)
 # ================= ================= =================
 
 def calculate_recommended_lot(entry_price, stop_loss_price):
-    """حساب اللوت المناسب لحساب السنت بناءً على رصيد الحساب والمخاطرة"""
     try:
         balance = USER_SETTINGS["account_balance_cents"]
         risk_pct = USER_SETTINGS["risk_percentage"]
-        
-        # المبلغ المعرض للمخاطرة بالسنت
         risk_amount_cents = balance * (risk_pct / 100.0)
-        
-        # فرق النقاط (Pips Distance)
         pips_at_risk = abs(entry_price - stop_loss_price)
         if pips_at_risk == 0:
             return 0.10
-        
-        # في حساب السنت: 1 لوت سنت = 10 سنت لكل نقطة حركة بالذهب ($1)
-        # لوت سنت = المخاطرة بالسنت / (فرق النقاط * قيمة النقطة للوت الواحد)
-        pip_value_per_cent_lot = 10.0  # 10 سنت للنقطة الواحدة بحجم 1.00 لوت سنت
+        pip_value_per_cent_lot = 10.0
         raw_lot = risk_amount_cents / (pips_at_risk * pip_value_per_cent_lot)
-        
-        # تقريب اللوت لأقرب 0.01 لوت
-        recommended_lot = max(0.01, round(raw_lot, 2))
-        return recommended_lot
+        return max(0.01, round(raw_lot, 2))
     except Exception as e:
-        print(f"Error calculating lot size: {e}")
+        print(f"Error calculating lot: {e}")
         return 0.10
 
 # ================= ================= =================
-# 5. تحليل المؤشرات وتوليد الإشارات (Market Analysis)
+# 5. تحليل السوق وقراءة الأسعار (Market Analysis)
 # ================= ================= =================
 
 def calculate_rsi(prices, period=14):
@@ -122,13 +111,17 @@ def calculate_ema(prices, period):
     return round(ema, 2)
 
 def analyze_gold_market():
+    # حظر التداول نهائياً في عطلة نهاية الأسبوع
+    if is_market_closed():
+        print("⏸️ السوق مغلق (عطلة نهاية الأسبوع). لا توجد عمليات تحليل.")
+        return None
+
     # فحص فلتر الأخبار
     has_news, news_title = is_high_impact_news_near()
     if has_news:
-        print(f"⚠️ التداول متوقف مؤقتاً بسبب خبر اقتصادي هام: {news_title}")
+        print(f"⚠️ متوقف بسبب خبر: {news_title}")
         return None
 
-    # جلب بيانات M15 من Twelve Data
     url = f"https://api.twelvedata.com/time_series?symbol=XAU/USD&interval=15min&outputsize=60&apikey={TWELVE_DATA_API_KEY}"
     try:
         res = requests.get(url, timeout=10).json()
@@ -143,7 +136,6 @@ def analyze_gold_market():
         ema20 = calculate_ema(closes, 20)
         ema50 = calculate_ema(closes, 50)
         
-        # شروط الإشارة (Buy / Sell)
         signal_type = None
         if ema20 > ema50 and 30 <= rsi <= 75:
             signal_type = "BUY"
@@ -172,14 +164,14 @@ def analyze_gold_market():
     return None
 
 # ================= ================= =================
-# 6. لوحة التحكم بالأوامر في التليجرام (Telegram UI)
+# 6. لوحة الإعدادات الجديدة (Telegram Commands)
 # ================= ================= =================
 
 def build_settings_keyboard():
     kb = InlineKeyboardMarkup(row_width=1)
     
     news_btn = "🟢 مفعل" if USER_SETTINGS["news_filter_active"] else "🔴 معطل"
-    kb.add(InlineKeyboardButton(f"فلتر الأخبار الاقتصادية: {news_btn}", callback_data="toggle_news"))
+    kb.add(InlineKeyboardButton(f"📰 فلتر الأخبار الاقتصادية: {news_btn}", callback_data="toggle_news"))
     
     risk_text = f"🎯 نسبة المخاطرة الحالية: {USER_SETTINGS['risk_percentage']}%"
     kb.add(InlineKeyboardButton(risk_text, callback_data="change_risk"))
@@ -188,7 +180,7 @@ def build_settings_keyboard():
     kb.add(InlineKeyboardButton(bal_text, callback_data="change_balance"))
     
     rep_btn = "🟢 شغال" if USER_SETTINGS["send_reports"] else "🔴 متوقف"
-    kb.add(InlineKeyboardButton(f"التقارير الدورية: {rep_btn}", callback_data="toggle_reports"))
+    kb.add(InlineKeyboardButton(f"📊 التقارير الدورية: {rep_btn}", callback_data="toggle_reports"))
     
     return kb
 
@@ -196,7 +188,7 @@ def build_settings_keyboard():
 def send_settings(message):
     bot.send_message(
         message.chat.id,
-        "⚙️ **لوحة تحكم بوت السكالبينج الاحترافي (XAUUSD)**\n\nيمكنك تعديل المخاطرة والرصيد وتفعيل الفلاتر بنقرة واحدة:",
+        "⚙️ **لوحة التحكم بالنظام المطور (XAUUSD)**\n\nاضغط على الأزرار للتعديل المباشر:",
         parse_mode="Markdown",
         reply_markup=build_settings_keyboard()
     )
@@ -205,17 +197,12 @@ def send_settings(message):
 def handle_callback(call):
     if call.data == "toggle_news":
         USER_SETTINGS["news_filter_active"] = not USER_SETTINGS["news_filter_active"]
-        bot.answer_callback_query(call.id, "تم تغيير حالة فلتر الأخبار")
     elif call.data == "toggle_reports":
         USER_SETTINGS["send_reports"] = not USER_SETTINGS["send_reports"]
-        bot.answer_callback_query(call.id, "تم تغيير حالة التقارير")
     elif call.data == "change_risk":
-        # التبديل بين 0.5% و 1.0% و 2.0%
         current = USER_SETTINGS["risk_percentage"]
         USER_SETTINGS["risk_percentage"] = 1.0 if current == 0.5 else (2.0 if current == 1.0 else 0.5)
-        bot.answer_callback_query(call.id, f"تم ضبط المخاطرة على {USER_SETTINGS['risk_percentage']}%")
     elif call.data == "change_balance":
-        # التبديل بين أحجام الحسابات الشائعة للسهولة
         current = USER_SETTINGS["account_balance_cents"]
         if current == 200000:
             USER_SETTINGS["account_balance_cents"] = 300000
@@ -223,16 +210,14 @@ def handle_callback(call):
             USER_SETTINGS["account_balance_cents"] = 100000
         else:
             USER_SETTINGS["account_balance_cents"] = 200000
-        bot.answer_callback_query(call.id, f"تم ضبط الرصيد على {USER_SETTINGS['account_balance_cents']} سنت")
 
-    # تحديث الأزرار فوراً
     try:
         bot.edit_message_reply_markup(call.message.chat.id, call.message.message_id, reply_markup=build_settings_keyboard())
     except:
         pass
 
 # ================= ================= =================
-# 7. الحلقات الدورية والتنفيذ (Main Loops)
+# 7. الحلقة الرئيسية (Scanner Loop)
 # ================= ================= =================
 
 def market_scanner_loop():
@@ -254,9 +239,8 @@ def market_scanner_loop():
         except Exception as e:
             print(f"Scanner Loop Error: {e}")
         
-        time.sleep(300)  # فحص كل 5 دقائق
+        time.sleep(300)
 
-# بدء خادم الويب والمراقبة في الخلفية
 if __name__ == "__main__":
     threading.Thread(target=run_flask, daemon=True).start()
     threading.Thread(target=market_scanner_loop, daemon=True).start()
