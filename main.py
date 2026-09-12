@@ -5,7 +5,7 @@ from datetime import datetime
 from flask import Flask
 import threading
 
-# استيراد مكتبة تليجرام بالطريقة الصحيحة المتوافقة مع Render
+# 1. المكاتب مع المعالجة التلقائية للتثبيت
 try:
     import telebot
     from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
@@ -17,14 +17,20 @@ except ImportError:
     from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
 
 # ================= ================= =================
-# 1. الإعدادات والمتغيرات العامة (Bot Configuration)
+# 2. الإعدادات والتوكين (ضع التوكين والـ ID الخاصين بك هنا بين التنصيص إذا لم تضعهم في Render)
 # ================= ================= =================
 
-TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "YOUR_TELEGRAM_TOKEN")
-TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "YOUR_CHAT_ID")
-TWELVE_DATA_API_KEY = os.environ.get("TWELVE_DATA_API_KEY", "YOUR_TWELVEDATA_KEY")
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
+TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
+TWELVE_DATA_API_KEY = os.environ.get("TWELVE_DATA_API_KEY")
 
-bot = telebot.TeleBot(TELEGRAM_BOT_TOKEN)
+# تحقق أمني لمنع الـ Crash إذا كان التوكين مفقوداً
+if not TELEGRAM_BOT_TOKEN or ":" not in TELEGRAM_BOT_TOKEN:
+    print("⚠️ تحذير: لم يتم العثور على TELEGRAM_BOT_TOKEN صحيح في Environment Variables!")
+    # يمكنك وضع التوكين الخاص بك بدلاً من التمرير للتجربة السريعة:
+    # TELEGRAM_BOT_TOKEN = "ضع_التوكين_هنا"
+
+bot = telebot.TeleBot(TELEGRAM_BOT_TOKEN) if TELEGRAM_BOT_TOKEN and ":" in TELEGRAM_BOT_TOKEN else None
 app = Flask(__name__)
 
 USER_SETTINGS = {
@@ -35,7 +41,7 @@ USER_SETTINGS = {
 }
 
 # ================= ================= =================
-# 2. خادم الإيقاظ (Flask Server)
+# 3. خادم الإيقاظ (Flask Server)
 # ================= ================= =================
 
 @app.route('/')
@@ -46,7 +52,7 @@ def run_flask():
     app.run(host='0.0.0.0', port=10000)
 
 # ================= ================= =================
-# 3. فحص عطلة نهاية الأسبوع والأخبار
+# 4. فحص العطلات والأخبار الاقتصادية
 # ================= ================= =================
 
 def is_market_closed():
@@ -73,7 +79,7 @@ def is_high_impact_news_near():
     return False, ""
 
 # ================= ================= =================
-# 4. حساب اللوت الذكي (Lot Calculator)
+# 5. حاسبة اللوت الذكية (Lot Calculator)
 # ================= ================= =================
 
 def calculate_recommended_lot(entry_price, stop_loss_price):
@@ -92,7 +98,7 @@ def calculate_recommended_lot(entry_price, stop_loss_price):
         return 0.10
 
 # ================= ================= =================
-# 5. تحليل السوق وقراءة الأسعار (Market Analysis)
+# 6. تحليل أسعار الذهب (Market Analysis)
 # ================= ================= =================
 
 def calculate_rsi(prices, period=14):
@@ -127,6 +133,9 @@ def analyze_gold_market():
     has_news, news_title = is_high_impact_news_near()
     if has_news:
         print(f"⚠️ متوقف بسبب خبر: {news_title}")
+        return None
+
+    if not TWELVE_DATA_API_KEY:
         return None
 
     url = f"https://api.twelvedata.com/time_series?symbol=XAU/USD&interval=15min&outputsize=60&apikey={TWELVE_DATA_API_KEY}"
@@ -171,12 +180,11 @@ def analyze_gold_market():
     return None
 
 # ================= ================= =================
-# 6. لوحة الإعدادات وتليجرام (Telegram Commands)
+# 7. لوحة التحكم بالأزرار والتليجرام (Telegram Handlers)
 # ================= ================= =================
 
 def build_settings_keyboard():
     kb = InlineKeyboardMarkup(row_width=1)
-    
     news_btn = "🟢 مفعل" if USER_SETTINGS["news_filter_active"] else "🔴 معطل"
     kb.add(InlineKeyboardButton(f"📰 فلتر الأخبار الاقتصادية: {news_btn}", callback_data="toggle_news"))
     
@@ -191,47 +199,48 @@ def build_settings_keyboard():
     
     return kb
 
-@bot.message_handler(commands=['start', 'settings'])
-def send_settings(message):
-    bot.send_message(
-        message.chat.id,
-        "⚙️ **لوحة التحكم بالنظام المطور (XAUUSD)**\n\nاضغط على الأزرار للتعديل المباشر:",
-        parse_mode="Markdown",
-        reply_markup=build_settings_keyboard()
-    )
+if bot:
+    @bot.message_handler(commands=['start', 'settings'])
+    def send_settings(message):
+        bot.send_message(
+            message.chat.id,
+            "⚙️ **لوحة التحكم بالنظام المطور (XAUUSD)**\n\nاضغط على الأزرار للتعديل المباشر:",
+            parse_mode="Markdown",
+            reply_markup=build_settings_keyboard()
+        )
 
-@bot.callback_query_handler(func=lambda call: True)
-def handle_callback(call):
-    if call.data == "toggle_news":
-        USER_SETTINGS["news_filter_active"] = not USER_SETTINGS["news_filter_active"]
-    elif call.data == "toggle_reports":
-        USER_SETTINGS["send_reports"] = not USER_SETTINGS["send_reports"]
-    elif call.data == "change_risk":
-        current = USER_SETTINGS["risk_percentage"]
-        USER_SETTINGS["risk_percentage"] = 1.0 if current == 0.5 else (2.0 if current == 1.0 else 0.5)
-    elif call.data == "change_balance":
-        current = USER_SETTINGS["account_balance_cents"]
-        if current == 200000:
-            USER_SETTINGS["account_balance_cents"] = 300000
-        elif current == 300000:
-            USER_SETTINGS["account_balance_cents"] = 100000
-        else:
-            USER_SETTINGS["account_balance_cents"] = 200000
+    @bot.callback_query_handler(func=lambda call: True)
+    def handle_callback(call):
+        if call.data == "toggle_news":
+            USER_SETTINGS["news_filter_active"] = not USER_SETTINGS["news_filter_active"]
+        elif call.data == "toggle_reports":
+            USER_SETTINGS["send_reports"] = not USER_SETTINGS["send_reports"]
+        elif call.data == "change_risk":
+            current = USER_SETTINGS["risk_percentage"]
+            USER_SETTINGS["risk_percentage"] = 1.0 if current == 0.5 else (2.0 if current == 1.0 else 0.5)
+        elif call.data == "change_balance":
+            current = USER_SETTINGS["account_balance_cents"]
+            if current == 200000:
+                USER_SETTINGS["account_balance_cents"] = 300000
+            elif current == 300000:
+                USER_SETTINGS["account_balance_cents"] = 100000
+            else:
+                USER_SETTINGS["account_balance_cents"] = 200000
 
-    try:
-        bot.edit_message_reply_markup(call.message.chat.id, call.message.message_id, reply_markup=build_settings_keyboard())
-    except:
-        pass
+        try:
+            bot.edit_message_reply_markup(call.message.chat.id, call.message.message_id, reply_markup=build_settings_keyboard())
+        except:
+            pass
 
 # ================= ================= =================
-# 7. الحلقة الرئيسية (Scanner Loop)
+# 8. الحلقة الرئيسية للمراقبة (Scanner Loop)
 # ================= ================= =================
 
 def market_scanner_loop():
     while True:
         try:
             signal = analyze_gold_market()
-            if signal:
+            if signal and bot and TELEGRAM_CHAT_ID:
                 msg = (
                     f"🚀 **إشارة سكالبينج جديدة على الذهب (XAUUSD)**\n\n"
                     f"🔹 **النوع:** {signal['type']} STOP\n"
@@ -251,4 +260,5 @@ def market_scanner_loop():
 if __name__ == "__main__":
     threading.Thread(target=run_flask, daemon=True).start()
     threading.Thread(target=market_scanner_loop, daemon=True).start()
-    bot.infinity_polling()
+    if bot:
+        bot.infinity_polling()
