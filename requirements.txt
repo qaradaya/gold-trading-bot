@@ -1,5 +1,7 @@
-python-telegram-bot
 flask
+requests
+pyTelegramBotAPI
+python-telegram-bot
 yfinance
 pandas
 
