@@ -27,8 +27,8 @@ send_status_reports = True
 strategy_mode = "flexible"   
 news_filter_active = True
 scan_target = "gold_only"  # الخيارات: gold_only, gold_forex, stocks_only, all
-account_balance_cents = 200000  # رصيد الحساب بالسنت[span_2](start_span)[span_2](end_span)
-risk_percentage = 0.5           # نسبة المخاطرة الافتراضية 0.5%[span_3](start_span)[span_3](end_span)
+account_balance_cents = 200000  # رصيد الحساب بالسنت
+risk_percentage = 0.5           # نسبة المخاطرة الافتراضية 0.5%
 
 # قوائم أصول التداول
 FOREX_PAIRS = ["EUR/USD", "GBP/USD", "USD/JPY"]
@@ -45,7 +45,7 @@ async def wait_for_next_check():
 # 2. فلتر الأخبار وحاسبة اللوت
 # ================= ================= =================
 def is_high_impact_news_near():
-    """فحص الأخبار الاقتصادية عالية التأثير على الدولار (USD)""[span_4](start_span)"[span_4](end_span)
+    """فحص الأخبار الاقتصادية عالية التأثير على الدولار (USD)"""
     if not news_filter_active:
         return False, ""
     try:
@@ -66,10 +66,10 @@ def is_high_impact_news_near():
     return False, ""
 
 def calculate_recommended_lot(symbol, entry_price, stop_loss_price):
-    """حساب حجم اللوت التلقائي بناءً على طبيعة الأصل والرصيد والستوب""[span_5](start_span)"[span_5](end_span)
+    """حساب حجم اللوت التلقائي بناءً على طبيعة الأصل والرصيد والستوب"""
     try:
-        risk_amount_cents = account_balance_cents * (risk_percentage / 100.0)[span_6](start_span)[span_6](end_span)
-        pips_at_risk = abs(entry_price - stop_loss_price)[span_7](start_span)[span_7](end_span)
+        risk_amount_cents = account_balance_cents * (risk_percentage / 100.0)
+        pips_at_risk = abs(entry_price - stop_loss_price)
         if pips_at_risk == 0:
             return 0.10
         
@@ -78,14 +78,14 @@ def calculate_recommended_lot(symbol, entry_price, stop_loss_price):
             pip_value_per_cent_lot = 1.0
         elif symbol in STOCKS_LIST:               # الأسهم
             pip_value_per_cent_lot = 100.0
-        else:                                     # الذهب (XAU/USD)[span_8](start_span)[span_8](end_span)
-            pip_value_per_cent_lot = 10.0[span_9](start_span)[span_9](end_span)
+        else:                                     # الذهب (XAU/USD)
+            pip_value_per_cent_lot = 10.0
 
-        raw_lot = risk_amount_cents / (pips_at_risk * pip_value_per_cent_lot)[span_10](start_span)[span_10](end_span)
-        return max(0.01, round(raw_lot, 2))[span_11](start_span)[span_11](end_span)
+        raw_lot = risk_amount_cents / (pips_at_risk * pip_value_per_cent_lot)
+        return max(0.01, round(raw_lot, 2))
     except Exception as e:
         print(f"Error calculating lot: {e}")
-        return 0.10[span_12](start_span)[span_12](end_span)
+        return 0.10
 
 # ================= ================= =================
 # 3. التحليلات الفنية ومؤشرات السوق
@@ -136,13 +136,13 @@ def analyze_market_symbol(symbol):
     if now_utc.weekday() in [5, 6]:
         return None, "MARKET_CLOSED", 0, 0, 0, 0
 
-    has_news, news_title = is_high_impact_news_near()[span_13](start_span)[span_13](end_span)
+    has_news, news_title = is_high_impact_news_near()
     if has_news:
-        return None, "NEWS_PAUSE", 0, 0, 0, 0[span_14](start_span)[span_14](end_span)
+        return None, "NEWS_PAUSE", 0, 0, 0, 0
 
-    api_key = os.environ.get("TWELVE_DATA_API_KEY")[span_15](start_span)[span_15](end_span)
+    api_key = os.environ.get("TWELVE_DATA_API_KEY")
     if not api_key:
-        return None, "NO_KEY", 0, 0, 0, 0[span_16](start_span)[span_16](end_span)
+        return None, "NO_KEY", 0, 0, 0, 0
 
     try:
         # جلب البيانات الفنية للأصل المطلوب
@@ -165,37 +165,37 @@ def analyze_market_symbol(symbol):
         volume_surging = True
         
         if symbol == "XAU/USD":
-            url_futures = f"https://api.twelvedata.com/time_series?symbol=MGC&interval=15min&outputsize=40&apikey={api_key}[span_17](start_span)"[span_17](end_span)
-            res_futures = requests.get(url_futures, timeout=8).json()[span_18](start_span)[span_18](end_span)
+            url_futures = f"https://api.twelvedata.com/time_series?symbol=MGC&interval=15min&outputsize=40&apikey={api_key}"
+            res_futures = requests.get(url_futures, timeout=8).json()
             if "values" in res_futures:
-                futures_values = res_futures["values"][span_19](start_span)[span_19](end_span)
-                futures_values.reverse()[span_20](start_span)[span_20](end_span)
-                futures_closes = [float(item["close"]) for item in futures_values][span_21](start_span)[span_21](end_span)
-                futures_volumes = [float(item.get("volume", 0)) for item in futures_values][span_22](start_span)[span_22](end_span)
-                futures_price = round(futures_closes[-1], 2)[span_23](start_span)[span_23](end_span)
-                basis_current = round(futures_price - spot_price, 2)[span_24](start_span)[span_24](end_span)
-                basis_prev = round(futures_closes[-2] - spot_closes[-2], 2)[span_25](start_span)[span_25](end_span)
-                basis_expansion = round(basis_current - basis_prev, 2)[span_26](start_span)[span_26](end_span)
+                futures_values = res_futures["values"]
+                futures_values.reverse()
+                futures_closes = [float(item["close"]) for item in futures_values]
+                futures_volumes = [float(item.get("volume", 0)) for item in futures_values]
+                futures_price = round(futures_closes[-1], 2)
+                basis_current = round(futures_price - spot_price, 2)
+                basis_prev = round(futures_closes[-2] - spot_closes[-2], 2)
+                basis_expansion = round(basis_current - basis_prev, 2)
                 
-                volume_current = futures_volumes[-1][span_27](start_span)[span_27](end_span)
-                volume_avg = sum(futures_volumes[-5:-1]) / 4 if len(futures_volumes) >= 5 else volume_current[span_28](start_span)[span_28](end_span)
-                volume_surging = volume_current > volume_avg[span_29](start_span)[span_29](end_span)
+                volume_current = futures_volumes[-1]
+                volume_avg = sum(futures_volumes[-5:-1]) / 4 if len(futures_volumes) >= 5 else volume_current
+                volume_surging = volume_current > volume_avg
 
         # المؤشرات الفنية
-        ema20 = calculate_ema(spot_closes, 20)[-1][span_30](start_span)[span_30](end_span)
-        ema50 = calculate_ema(spot_closes, 50)[-1][span_31](start_span)[span_31](end_span)
-        rsi = calculate_rsi(spot_closes, 14)[span_32](start_span)[span_32](end_span)
-        tight_swing_high = max(spot_highs[-3:-1])[span_33](start_span)[span_33](end_span)
-        tight_swing_low = min(spot_lows[-3:-1])[span_34](start_span)[span_34](end_span)
+        ema20 = calculate_ema(spot_closes, 20)[-1]
+        ema50 = calculate_ema(spot_closes, 50)[-1]
+        rsi = calculate_rsi(spot_closes, 14)
+        tight_swing_high = max(spot_highs[-3:-1])
+        tight_swing_low = min(spot_lows[-3:-1])
 
         if active_order is not None and active_order.get("symbol") == symbol:
-            status_event = "STILL_TRIGGERED" if order_status == "TRIGGERED" else "STILL_PENDING[span_35](start_span)"[span_35](end_span)
-            return active_order, status_event, spot_price, basis_current, rsi, 0[span_36](start_span)[span_36](end_span)
+            status_event = "STILL_TRIGGERED" if order_status == "TRIGGERED" else "STILL_PENDING"
+            return active_order, status_event, spot_price, basis_current, rsi, 0
 
-        rsi_buy_max = 75 if strategy_mode == "flexible" else 68[span_37](start_span)[span_37](end_span)
-        rsi_buy_min = 30[span_38](start_span)[span_38](end_span)
-        rsi_sell_min = 25 if strategy_mode == "flexible" else 32[span_39](start_span)[span_39](end_span)
-        rsi_sell_max = 70[span_40](start_span)[span_40](end_span)
+        rsi_buy_max = 75 if strategy_mode == "flexible" else 68
+        rsi_buy_min = 30  
+        rsi_sell_min = 25 if strategy_mode == "flexible" else 32
+        rsi_sell_max = 70 
         
         # المسافات والهوامش حسب طبيعة الأصل
         offset = 0.50 if symbol == "XAU/USD" else (0.0005 if "/" in symbol else 0.20)
@@ -315,9 +315,8 @@ async def market_scanner_loop(bot: Bot, chat_id: str):
                         f"⚖️ **المخاطرة المحددة:** {risk_percentage}%"
                     )
                     await bot.send_message(chat_id=chat_id, text=msg, parse_mode="Markdown")
-                    break # الاكتفاء بإشارة واحدة في الجولة لمنع التعارض
+                    break
 
-            # التقرير الدوري للحالة العامة
             if send_status_reports:
                 status_msg = (
                     f"🔍 **تقرير فحص السوق الدوري**\n"
@@ -337,13 +336,12 @@ async def market_scanner_loop(bot: Bot, chat_id: str):
 def build_settings_keyboard():
     global send_status_reports, strategy_mode, news_filter_active, risk_percentage, account_balance_cents, scan_target
     
-    report_btn_text = "🔴 إيقاف التقرير الدوري" if send_status_reports else "🟢 تشغيل التقرير الدوري[span_41](start_span)"[span_41](end_span)
-    mode_btn_text = "🎯 النمط: مرن (إشارات أكثر)" if strategy_mode == "flexible" else "🛡 النمط: مشدد (إشارات أقل)[span_42](start_span)"[span_42](end_span)
-    news_btn_text = "🟢 فلتر الأخبار: مفعل" if news_filter_active else "🔴 فلتر الأخبار: معطل[span_43](start_span)"[span_43](end_span)
-    risk_btn_text = f"🎯 نسبة المخاطرة: {risk_percentage}%[span_44](start_span)"[span_44](end_span)
-    bal_btn_text = f"💰 الرصيد: {account_balance_cents} سنت (اضغط للتغيير)[span_45](start_span)"[span_45](end_span)
+    report_btn_text = "🔴 إيقاف التقرير الدوري" if send_status_reports else "🟢 تشغيل التقرير الدوري"
+    mode_btn_text = "🎯 النمط: مرن (إشارات أكثر)" if strategy_mode == "flexible" else "🛡 النمط: مشدد (إشارات أقل)"
+    news_btn_text = "🟢 فلتر الأخبار: مفعل" if news_filter_active else "🔴 فلتر الأخبار: معطل"
+    risk_btn_text = f"🎯 نسبة المخاطرة: {risk_percentage}%"
+    bal_btn_text = f"💰 الرصيد: {account_balance_cents} سنت (اضغط للتغيير)"
     
-    # تحويل تسمية أزرار النطاق
     target_labels = {
         "gold_only": "🟡 الذهب فقط",
         "gold_forex": "💱 الذهب + العملات",
@@ -364,9 +362,9 @@ def build_settings_keyboard():
 
 async def handle_settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global send_status_reports, strategy_mode, news_filter_active, risk_percentage, account_balance_cents, scan_target
-    rep_status = "مُفعل 🟢" if send_status_reports else "معطل 🔴[span_46](start_span)"[span_46](end_span)
-    mode_status = "مرن ⚡️" if strategy_mode == "flexible" else "مشدد 🛡[span_47](start_span)"[span_47](end_span)
-    news_status = "مُفعل 📰" if news_filter_active else "معطل ❌[span_48](start_span)"[span_48](end_span)
+    rep_status = "مُفعل 🟢" if send_status_reports else "معطل 🔴"
+    mode_status = "مرن ⚡️" if strategy_mode == "flexible" else "مشدد 🛡"
+    news_status = "مُفعل 📰" if news_filter_active else "معطل ❌"
     
     await update.message.reply_text(
         f"⚙️ **لوحة تحكم إعدادات البوت المطور**\n\n"
@@ -376,7 +374,7 @@ async def handle_settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"▪️ فلتر الأخبار الاقتصادية: **{news_status}**\n"
         f"▪️ نسبة المخاطرة: **{risk_percentage}%**\n"
         f"▪️ رصيد الحساب الحالي: **{account_balance_cents} سنت**\n\n"
-        f"💡 *لتغيير الرصيد يدوياً، أرسل رسالة بالصيغة:* `balance 150000`",[span_49](start_span)[span_49](end_span)
+        f"💡 *لتغيير الرصيد يدوياً، أرسل رسالة بالصيغة:* `balance 150000`",
         reply_markup=build_settings_keyboard(),
         parse_mode="Markdown"
     )
@@ -385,13 +383,13 @@ async def handle_text_messages(update: Update, context: ContextTypes.DEFAULT_TYP
     global account_balance_cents
     text = update.message.text.strip()
     
-    if text.lower().startswith("balance ") or text.lower().startswith("رصيد "):[span_50](start_span)[span_50](end_span)
+    if text.lower().startswith("balance ") or text.lower().startswith("رصيد "):
         try:
-            val = int(text.split()[1])[span_51](start_span)[span_51](end_span)
-            account_balance_cents = val[span_52](start_span)[span_52](end_span)
-            await update.message.reply_text(f"✅ **تم تحديث رصيد الحساب بنجاح إلى:** `{account_balance_cents}` سنت", parse_mode="Markdown")[span_53](start_span)[span_53](end_span)
+            val = int(text.split()[1])
+            account_balance_cents = val
+            await update.message.reply_text(f"✅ **تم تحديث رصيد الحساب بنجاح إلى:** `{account_balance_cents}` سنت", parse_mode="Markdown")
         except Exception:
-            await update.message.reply_text("❌ **خطأ في الصيغة!** اكتب الكلمة متبوعة بالرقم فقط، مثال:\n`balance 150000`", parse_mode="Markdown")[span_54](start_span)[span_54](end_span)
+            await update.message.reply_text("❌ **خطأ في الصيغة!** اكتب الكلمة متبوعة بالرقم فقط، مثال:\n`balance 150000`", parse_mode="Markdown")
 
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global send_status_reports, strategy_mode, news_filter_active, risk_percentage, account_balance_cents, scan_target
@@ -403,20 +401,20 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         next_idx = (modes.index(scan_target) + 1) % len(modes)
         scan_target = modes[next_idx]
     elif query.data == "toggle_report":
-        send_status_reports = not send_status_reports[span_55](start_span)[span_55](end_span)
+        send_status_reports = not send_status_reports
     elif query.data == "toggle_mode":
-        strategy_mode = "strict" if strategy_mode == "flexible" else "flexible[span_56](start_span)"[span_56](end_span)
+        strategy_mode = "strict" if strategy_mode == "flexible" else "flexible"
     elif query.data == "toggle_news":
-        news_filter_active = not news_filter_active[span_57](start_span)[span_57](end_span)
+        news_filter_active = not news_filter_active
     elif query.data == "toggle_risk":
-        risk_percentage = 1.0 if risk_percentage == 0.5 else (2.0 if risk_percentage == 1.0 else 0.5)[span_58](start_span)[span_58](end_span)
+        risk_percentage = 1.0 if risk_percentage == 0.5 else (2.0 if risk_percentage == 1.0 else 0.5)
     elif query.data == "prompt_balance":
-        await query.message.reply_text("✏️ **لإدخال قيمة الرصيد يدوياً:**\nأرسل رسالة تحتوي على كلمة `balance` ثم رقم الرصيد بالسنت.\n\nمثال: `balance 250000`", parse_mode="Markdown")[span_59](start_span)[span_59](end_span)
+        await query.message.reply_text("✏️ **لإدخال قيمة الرصيد يدوياً:**\nأرسل رسالة تحتوي على كلمة `balance` ثم رقم الرصيد بالسنت.\n\nمثال: `balance 250000`", parse_mode="Markdown")
         return
 
-    rep_status = "مُفعل 🟢" if send_status_reports else "معطل 🔴[span_60](start_span)"[span_60](end_span)
-    mode_status = "مرن ⚡️" if strategy_mode == "flexible" else "مشدد 🛡[span_61](start_span)"[span_61](end_span)
-    news_status = "مُفعل 📰" if news_filter_active else "معطل ❌[span_62](start_span)"[span_62](end_span)
+    rep_status = "مُفعل 🟢" if send_status_reports else "معطل 🔴"
+    mode_status = "مرن ⚡️" if strategy_mode == "flexible" else "مشدد 🛡"
+    news_status = "مُفعل 📰" if news_filter_active else "معطل ❌"
     
     await query.edit_message_text(
         f"⚙️ **لوحة تحكم إعدادات البوت المطور**\n\n"
@@ -425,7 +423,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"▪️ نمط الفلترة والتداول: **{mode_status}**\n"
         f"▪️ فلتر الأخبار الاقتصادية: **{news_status}**\n"
         f"▪️ نسبة المخاطرة: **{risk_percentage}%**\n"
-        f"▪️ رصيد الحساب الحالي: **{account_balance_cents} سنت**",[span_63](start_span)[span_63](end_span)
+        f"▪️ رصيد الحساب الحالي: **{account_balance_cents} سنت**",
         reply_markup=build_settings_keyboard(),
         parse_mode="Markdown"
     )
@@ -434,27 +432,27 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # 6. التشغيل الرئيسي
 # ================= ================= =================
 def main():
-    token = os.environ.get("TELEGRAM_TOKEN")[span_64](start_span)[span_64](end_span)
-    chat_id = os.environ.get("CHAT_ID")[span_65](start_span)[span_65](end_span)
+    token = os.environ.get("TELEGRAM_TOKEN")
+    chat_id = os.environ.get("CHAT_ID")
     
     if not token or not chat_id:
-        print("Missing TELEGRAM_TOKEN or CHAT_ID environment variables!")[span_66](start_span)[span_66](end_span)
+        print("Missing TELEGRAM_TOKEN or CHAT_ID environment variables!")
         return
     
-    Thread(target=run_web_server, daemon=True).start()[span_67](start_span)[span_67](end_span)
-    app_bot = Application.builder().token(token).build()[span_68](start_span)[span_68](end_span)
+    Thread(target=run_web_server, daemon=True).start()
+    app_bot = Application.builder().token(token).build()
     
-    app_bot.add_handler(CommandHandler("settings", handle_settings))[span_69](start_span)[span_69](end_span)
-    app_bot.add_handler(MessageHandler(filters.Regex(r'(?i)^settings$'), handle_settings))[span_70](start_span)[span_70](end_span)
-    app_bot.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_messages))[span_71](start_span)[span_71](end_span)
-    app_bot.add_handler(CallbackQueryHandler(button_callback))[span_72](start_span)[span_72](end_span)
+    app_bot.add_handler(CommandHandler("settings", handle_settings))
+    app_bot.add_handler(MessageHandler(filters.Regex(r'(?i)^settings$'), handle_settings))
+    app_bot.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND), handle_text_messages)
+    app_bot.add_handler(CallbackQueryHandler(button_callback))
     
-    loop = asyncio.get_event_loop()[span_73](start_span)[span_73](end_span)
-    loop.create_task(market_scanner_loop(app_bot.bot, chat_id))[span_74](start_span)[span_74](end_span)
-    loop.create_task(fast_price_monitor_loop(app_bot.bot, chat_id))[span_75](start_span)[span_75](end_span)
+    loop = asyncio.get_event_loop()
+    loop.create_task(market_scanner_loop(app_bot.bot, chat_id))
+    loop.create_task(fast_price_monitor_loop(app_bot.bot, chat_id))
     
     print("Multi-Asset Scalper bot is active & running...")
-    app_bot.run_polling()[span_76](start_span)[span_76](end_span)
+    app_bot.run_polling()
 
 if __name__ == "__main__":
-    main()[span_77](start_span)[span_77](end_span)
+    main()
