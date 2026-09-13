@@ -12,7 +12,7 @@ app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "Pro Scalper M15 Bot is Live!"
+    return "Pro Scalper M15 Gold Bot is Live!"
 
 def run_web_server():
     port = int(os.environ.get("PORT", 10000))
@@ -28,7 +28,7 @@ strategy_mode = "flexible"
 news_filter_active = True
 account_balance_cents = 200000  # رصيد الحساب بالسنت (يمكن تغييره نصوصاً)
 risk_percentage = 0.5           # نسبة المخاطرة الافتراضية 0.5%
-assets_mode = "GOLD_ONLY"       # الخيارات: GOLD_ONLY, GOLD_FOREX, STOCKS_ONLY, ALL
+assets_mode = "GOLD_ONLY"       # نطاق المسح الحالي
 
 ASSET_LISTS = {
     "GOLD_ONLY": ["XAU/USD"],
@@ -109,17 +109,17 @@ def calculate_ema(data, window):
         ema.append((price * weights[0]) + (ema[-1] * (1 - weights[0])))
     return ema
 
-def get_live_price(symbol="XAU/USD"):
+def get_live_price():
     api_key = os.environ.get("TWELVE_DATA_API_KEY")
     if not api_key:
         return None
     try:
-        url = f"https://api.twelvedata.com/price?symbol={symbol}&apikey={api_key}"
+        url = f"https://api.twelvedata.com/price?symbol=XAU/USD&apikey={api_key}"
         res = requests.get(url, timeout=5).json()
         if "price" in res:
             return float(res["price"])
     except Exception as e:
-        print(f"Live Price Error ({symbol}): {e}")
+        print(f"Live Price Error: {e}")
     return None
 
 def analyze_gold_market():
@@ -214,7 +214,7 @@ async def fast_price_monitor_loop(bot: Bot, chat_id: str):
     while True:
         try:
             if active_order is not None:
-                live_p = await asyncio.to_thread(get_live_price, "XAU/USD")
+                live_p = get_live_price()
                 if live_p is not None:
                     if order_status == "PENDING":
                         if active_order['type'] == 'Buy Stop' and live_p <= active_order['sl']:
@@ -268,17 +268,19 @@ async def market_scanner_loop(bot: Bot, chat_id: str):
     while True:
         try:
             await wait_for_next_check()
-            order, event, spot_price, basis, rsi, recommended_lot = await asyncio.to_thread(analyze_gold_market)
+            order, event, spot_price, basis, rsi, recommended_lot = analyze_gold_market()
             
             # ضمان إرسال التقرير الدوري بغض النظر عن حالة إغلاق السوق لتأكيد النشاط
             if send_status_reports and (event in ["NO_SIGNAL", "MARKET_CLOSED", "STILL_PENDING", "STILL_TRIGGERED", "NEWS_PAUSE"]):
                 market_text = " (عطلة/مغلق)" if event == "MARKET_CLOSED" else ""
                 current_assets_count = len(ASSET_LISTS.get(assets_mode, []))
                 status_msg = (
-                    f"🔍 **تقرير فحص السوق الدوري{market_text}**\n"
-                    f"⏱ **التوقيت:** {time.strftime('%H:%M')}\n"
-                    f"🌐 **نطاق المسح الحالي:** {assets_mode}\n\n"
-                    f"⚙️ *البوت يعمل بنجاح على فحص {current_assets_count} أصل/رموز.*"
+                    f"🔍 **تقرير فحص السوق (نشط){market_text}**\n"
+                    f"⏱ **التوقيت:** {time.strftime('%H:%M')} | **XAUUSD**\n"
+                    f"🌐 **نطاق المسح الحالي:** `{assets_mode}` ({current_assets_count} أصل)\n\n"
+                    f"📊 **سعر المنصة:** `{spot_price}`\n"
+                    f"📈 **RSI:** `{rsi}` | **الآجل/الفوري:** `{basis}`\n\n"
+                    f"⚙️ *البوت يعمل بنجاح ولا توجد إشارة جديدة.*"
                 )
                 await bot.send_message(chat_id=chat_id, text=status_msg, parse_mode="Markdown")
             elif order and event == "NEW_ORDER":
@@ -333,7 +335,6 @@ async def handle_settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
     rep_status = "مُفعل 🟢" if send_status_reports else "معطل 🔴"
     mode_status = "مرن ⚡️" if strategy_mode == "flexible" else "مشدد 🛡"
     news_status = "مُفعل 📰" if news_filter_active else "معطل ❌"
-    
     await update.message.reply_text(
         f"⚙️ **لوحة تحكم إعدادات البوت**\n\n"
         f"▪️ التقرير الدوري كل 5 دقائق: **{rep_status}**\n"
@@ -364,7 +365,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global send_status_reports, strategy_mode, news_filter_active, risk_percentage, account_balance_cents, assets_mode
     query = update.callback_query
     await query.answer()
-    
     if query.data == "toggle_report":
         send_status_reports = not send_status_reports
     elif query.data == "toggle_mode":
@@ -382,7 +382,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     rep_status = "مُفعل 🟢" if send_status_reports else "معطل 🔴"
     mode_status = "مرن ⚡️" if strategy_mode == "flexible" else "مشدد 🛡"
     news_status = "مُفعل 📰" if news_filter_active else "معطل ❌"
-    
     await query.edit_message_text(
         f"⚙️ **لوحة تحكم إعدادات البوت**\n\n"
         f"▪️ التقرير الدوري كل 5 دقائق: **{rep_status}**\n"
@@ -411,13 +410,11 @@ def main():
     app_bot.add_handler(MessageHandler(filters.Regex(r'(?i)^settings$'), handle_settings))
     app_bot.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_messages))
     app_bot.add_handler(CallbackQueryHandler(button_callback))
-    
     loop = asyncio.get_event_loop()
     loop.create_task(market_scanner_loop(app_bot.bot, chat_id))
     loop.create_task(fast_price_monitor_loop(app_bot.bot, chat_id))
     print("Bot fast-monitor active & listening...")
-    
-    app_bot.run_polling(drop_pending_updates=True)
+    app_bot.run_polling()
 
 if __name__ == "__main__":
     main()
