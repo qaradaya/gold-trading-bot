@@ -128,7 +128,7 @@ def get_live_price(symbol="XAU/USD"):
     return None
 
 def analyze_market_symbol(symbol):
-    """دالة تحليل معممة تدعم الذهب والعملات والأسهم"""
+    """دالة تحلیل معممة تدعم الذهب والعملات والأسهم"""
     global active_order, order_status, strategy_mode
     
     now_utc = datetime.utcnow()
@@ -431,7 +431,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ================= ================= =================
 # 6. التشغيل الرئيسي
 # ================= ================= =================
-def main():
+async def main_async():
     token = os.environ.get("TELEGRAM_TOKEN")
     chat_id = os.environ.get("CHAT_ID")
     
@@ -439,21 +439,31 @@ def main():
         print("Missing TELEGRAM_TOKEN or CHAT_ID environment variables!")
         return
     
+    # تشغيل سيرفر Web (Flask)
     Thread(target=run_web_server, daemon=True).start()
+    
+    # بناء تطبيق البوت
     app_bot = Application.builder().token(token).build()
     
-    # تصحيح الـ Handlers بالتمرير الصحيح للوسطاء (Filter + Callback Function)
+    # إضافة المعالجات (Handlers)
     app_bot.add_handler(CommandHandler("settings", handle_settings))
     app_bot.add_handler(MessageHandler(filters.Regex(r'(?i)^settings$'), handle_settings))
     app_bot.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_messages))
     app_bot.add_handler(CallbackQueryHandler(button_callback))
     
-    loop = asyncio.get_event_loop()
-    loop.create_task(market_scanner_loop(app_bot.bot, chat_id))
-    loop.create_task(fast_price_monitor_loop(app_bot.bot, chat_id))
+    # تهيئة وتحديث البوت في خلفية Asyncio
+    await app_bot.initialize()
+    await app_bot.start()
+    await app_bot.updater.start_polling()
+    
+    # تشغيل مهام الفحص والمراقبة
+    asyncio.create_task(market_scanner_loop(app_bot.bot, chat_id))
+    asyncio.create_task(fast_price_monitor_loop(app_bot.bot, chat_id))
     
     print("Multi-Asset Scalper bot is active & running...")
-    app_bot.run_polling()
+    
+    # الإبقاء على البوت قيد العمل
+    await asyncio.Event().wait()
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main_async())
