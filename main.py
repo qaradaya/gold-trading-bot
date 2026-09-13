@@ -1,7 +1,7 @@
 import os
 import time
 import asyncio
-import requests
+import httpx
 from datetime import datetime
 from threading import Thread
 from flask import Flask
@@ -26,8 +26,8 @@ order_status = None
 send_status_reports = True  
 strategy_mode = "flexible"   
 news_filter_active = True
-account_balance_cents = 200000  # رصيد الحساب بالسنت (يمكن تغييره نصوصاً)
-risk_percentage = 0.5           # نسبة المخاطرة الافتراضية 0.5%
+account_balance_cents = 200000  # رصيد الحساب بالسنت
+risk_percentage = 0.5           # نسبة المخاطرة الافتراضية
 assets_mode = "GOLD_ONLY"       # نطاق المسح الحالي
 
 ASSET_LISTS = {
@@ -45,31 +45,30 @@ async def wait_for_next_check():
         await asyncio.sleep(1)
 
 # ================= ================= =================
-# 2. فلتر الأخبار وحاسبة اللوت
+# 2. فلتر الأخبار وحاسبة اللوت (Async)
 # ================= ================= =================
-def is_high_impact_news_near():
-    """فحص الأخبار الاقتصادية عالية التأثير على الدولار (USD)"""
+async def is_high_impact_news_near():
+    """فحص الأخبار الاقتصادية بشكل Async لا يجمد البوت"""
     if not news_filter_active:
         return False, ""
     try:
-        url = "https://nfp.ourforecast.com/api/v1/events"
-        response = requests.get(url, timeout=5)
-        if response.status_code == 200:
-            events = response.json()
-            now = datetime.utcnow()
-            for event in events:
-                if event.get("currency") == "USD" and event.get("impact") == "High":
-                    event_time_str = event.get("date", "").replace("Z", "+00:00")
-                    if event_time_str:
-                        event_time = datetime.fromisoformat(event_time_str).replace(tzinfo=None)
-                        if abs((event_time - now).total_seconds()) <= 1800:
-                            return True, f"{event.get('title')} ({event_time.strftime('%H:%M')} UTC)"
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            response = await client.get("https://nfp.ourforecast.com/api/v1/events")
+            if response.status_code == 200:
+                events = response.json()
+                now = datetime.utcnow()
+                for event in events:
+                    if event.get("currency") == "USD" and event.get("impact") == "High":
+                        event_time_str = event.get("date", "").replace("Z", "+00:00")
+                        if event_time_str:
+                            event_time = datetime.fromisoformat(event_time_str).replace(tzinfo=None)
+                            if abs((event_time - now).total_seconds()) <= 1800:
+                                return True, f"{event.get('title')} ({event_time.strftime('%H:%M')} UTC)"
     except Exception as e:
         print(f"News API Error: {e}")
     return False, ""
 
 def calculate_recommended_lot(entry_price, stop_loss_price):
-    """حساب حجم اللوت التلقائي بناءً على رصيد الحساب وسعر الستوب"""
     try:
         risk_amount_cents = account_balance_cents * (risk_percentage / 100.0)
         pips_at_risk = abs(entry_price - stop_loss_price)
@@ -83,7 +82,7 @@ def calculate_recommended_lot(entry_price, stop_loss_price):
         return 0.10
 
 # ================= ================= =================
-# 3. التحليلات الفنية ومؤشرات السوق
+# 3. التحليلات الفنية ومؤشرات السوق (Async)
 # ================= ================= =================
 def calculate_rsi(closes, window=14):
     gains, losses = [], []
@@ -109,37 +108,37 @@ def calculate_ema(data, window):
         ema.append((price * weights[0]) + (ema[-1] * (1 - weights[0])))
     return ema
 
-def get_live_price():
+async def get_live_price():
     api_key = os.environ.get("TWELVE_DATA_API_KEY")
     if not api_key:
         return None
     try:
-        url = f"https://api.twelvedata.com/price?symbol=XAU/USD&apikey={api_key}"
-        res = requests.get(url, timeout=5).json()
-        if "price" in res:
-            return float(res["price"])
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            res = (await client.get(f"https://api.twelvedata.com/price?symbol=XAU/USD&apikey={api_key}")).json()
+            if "price" in res:
+                return float(res["price"])
     except Exception as e:
         print(f"Live Price Error: {e}")
     return None
 
-def analyze_gold_market():
+async def analyze_gold_market():
     global active_order, order_status, strategy_mode
     
     now_utc = datetime.utcnow()
-    # إذا كان السوق مغلقاً يتم إبلاغ حلقة الفحص دون إيقاف التقارير الدوريّة
     if now_utc.weekday() in [5, 6] or now_utc.hour == 21:
         return None, "MARKET_CLOSED", 0, 0, 0, 0
-    has_news, news_title = is_high_impact_news_near()
+    has_news, news_title = await is_high_impact_news_near()
     if has_news:
         return None, "NEWS_PAUSE", 0, 0, 0, 0
     api_key = os.environ.get("TWELVE_DATA_API_KEY")
     if not api_key:
         return None, "NO_KEY", 0, 0, 0, 0
     try:
-        url_spot = f"https://api.twelvedata.com/time_series?symbol=XAU/USD&interval=15min&outputsize=40&apikey={api_key}"
-        res_spot = requests.get(url_spot, timeout=8).json()
-        url_futures = f"https://api.twelvedata.com/time_series?symbol=MGC&interval=15min&outputsize=40&apikey={api_key}"
-        res_futures = requests.get(url_futures, timeout=8).json()
+        async with httpx.AsyncClient(timeout=8.0) as client:
+            url_spot = f"https://api.twelvedata.com/time_series?symbol=XAU/USD&interval=15min&outputsize=40&apikey={api_key}"
+            res_spot = (await client.get(url_spot)).json()
+            url_futures = f"https://api.twelvedata.com/time_series?symbol=MGC&interval=15min&outputsize=40&apikey={api_key}"
+            res_futures = (await client.get(url_futures)).json()
         
         if "values" not in res_spot:
             return None, "API_ERROR", 0, 0, 0, 0
@@ -214,7 +213,7 @@ async def fast_price_monitor_loop(bot: Bot, chat_id: str):
     while True:
         try:
             if active_order is not None:
-                live_p = get_live_price()
+                live_p = await get_live_price()
                 if live_p is not None:
                     if order_status == "PENDING":
                         if active_order['type'] == 'Buy Stop' and live_p <= active_order['sl']:
@@ -268,9 +267,8 @@ async def market_scanner_loop(bot: Bot, chat_id: str):
     while True:
         try:
             await wait_for_next_check()
-            order, event, spot_price, basis, rsi, recommended_lot = analyze_gold_market()
+            order, event, spot_price, basis, rsi, recommended_lot = await analyze_gold_market()
             
-            # ضمان إرسال التقرير الدوري بغض النظر عن حالة إغلاق السوق لتأكيد النشاط
             if send_status_reports and (event in ["NO_SIGNAL", "MARKET_CLOSED", "STILL_PENDING", "STILL_TRIGGERED", "NEWS_PAUSE"]):
                 market_text = " (عطلة/مغلق)" if event == "MARKET_CLOSED" else ""
                 current_assets_count = len(ASSET_LISTS.get(assets_mode, []))
@@ -311,7 +309,6 @@ def build_settings_keyboard():
     risk_btn_text = f"🎯 نسبة المخاطرة: {risk_percentage}%"
     bal_btn_text = f"💰 الرصيد: {account_balance_cents} سنت (اضغط للتغيير)"
     
-    # أزرار اختيار نطاق التداول
     gold_btn = f"{'✅ ' if assets_mode == 'GOLD_ONLY' else ''}🟡 الذهب فقط"
     forex_btn = f"{'✅ ' if assets_mode == 'GOLD_FOREX' else ''}💱 الذهب والعملات"
     stocks_btn = f"{'✅ ' if assets_mode == 'STOCKS_ONLY' else ''}📈 الأسهم فقط"
@@ -349,7 +346,6 @@ async def handle_settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def handle_text_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """استقبال القيمة اليدوية للرصيد"""
     global account_balance_cents
     text = update.message.text.strip()
     
@@ -395,8 +391,15 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 # ================= ================= =================
-# 6. التشغيل الرئيسي
+# 6. التشغيل الرئيسي بدون تجميد
 # ================= ================= =================
+async def post_init(application: Application):
+    """تشغيل المهام خلف الكواليس ضمن حلقة الأحداث الرسمية للبوت"""
+    chat_id = os.environ.get("CHAT_ID")
+    if chat_id:
+        asyncio.create_task(market_scanner_loop(application.bot, chat_id))
+        asyncio.create_task(fast_price_monitor_loop(application.bot, chat_id))
+
 def main():
     token = os.environ.get("TELEGRAM_TOKEN")
     chat_id = os.environ.get("CHAT_ID")
@@ -404,15 +407,21 @@ def main():
     if not token or not chat_id:
         print("Missing TELEGRAM_TOKEN or CHAT_ID environment variables!")
         return
+    
     Thread(target=run_web_server, daemon=True).start()
-    app_bot = Application.builder().token(token).build()
+    
+    app_bot = (
+        Application.builder()
+        .token(token)
+        .post_init(post_init)
+        .build()
+    )
+    
     app_bot.add_handler(CommandHandler("settings", handle_settings))
     app_bot.add_handler(MessageHandler(filters.Regex(r'(?i)^settings$'), handle_settings))
     app_bot.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_messages))
     app_bot.add_handler(CallbackQueryHandler(button_callback))
-    loop = asyncio.get_event_loop()
-    loop.create_task(market_scanner_loop(app_bot.bot, chat_id))
-    loop.create_task(fast_price_monitor_loop(app_bot.bot, chat_id))
+    
     print("Bot fast-monitor active & listening...")
     app_bot.run_polling()
 
