@@ -442,9 +442,10 @@ def main():
     Thread(target=run_web_server, daemon=True).start()
     app_bot = Application.builder().token(token).build()
     
+    # تصحيح الـ Handlers بالتمرير الصحيح للوسطاء (Filter + Callback Function)
     app_bot.add_handler(CommandHandler("settings", handle_settings))
     app_bot.add_handler(MessageHandler(filters.Regex(r'(?i)^settings$'), handle_settings))
-    app_bot.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND), handle_text_messages)
+    app_bot.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_messages))
     app_bot.add_handler(CallbackQueryHandler(button_callback))
     
     loop = asyncio.get_event_loop()
