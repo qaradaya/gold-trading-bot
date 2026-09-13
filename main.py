@@ -12,7 +12,7 @@ app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "Pro Scalper M15 Gold Bot is Live!"
+    return "Pro Scalper M15 Bot is Live!"
 
 def run_web_server():
     port = int(os.environ.get("PORT", 10000))
@@ -28,6 +28,14 @@ strategy_mode = "flexible"
 news_filter_active = True
 account_balance_cents = 200000  # رصيد الحساب بالسنت (يمكن تغييره نصوصاً)
 risk_percentage = 0.5           # نسبة المخاطرة الافتراضية 0.5%
+assets_mode = "GOLD_ONLY"       # الخيارات: GOLD_ONLY, GOLD_FOREX, STOCKS_ONLY, ALL
+
+ASSET_LISTS = {
+    "GOLD_ONLY": ["XAU/USD"],
+    "GOLD_FOREX": ["XAU/USD", "EUR/USD", "GBP/USD", "USD/JPY"],
+    "STOCKS_ONLY": ["TSLA", "NVDA", "AMD", "AAPL"],
+    "ALL": ["XAU/USD", "EUR/USD", "GBP/USD", "USD/JPY", "TSLA", "NVDA", "AMD", "AAPL"]
+}
 
 async def wait_for_next_check():
     while True:
@@ -101,17 +109,17 @@ def calculate_ema(data, window):
         ema.append((price * weights[0]) + (ema[-1] * (1 - weights[0])))
     return ema
 
-def get_live_price():
+def get_live_price(symbol="XAU/USD"):
     api_key = os.environ.get("TWELVE_DATA_API_KEY")
     if not api_key:
         return None
     try:
-        url = f"https://api.twelvedata.com/price?symbol=XAU/USD&apikey={api_key}"
+        url = f"https://api.twelvedata.com/price?symbol={symbol}&apikey={api_key}"
         res = requests.get(url, timeout=5).json()
         if "price" in res:
             return float(res["price"])
     except Exception as e:
-        print(f"Live Price Error: {e}")
+        print(f"Live Price Error ({symbol}): {e}")
     return None
 
 def analyze_gold_market():
@@ -206,7 +214,7 @@ async def fast_price_monitor_loop(bot: Bot, chat_id: str):
     while True:
         try:
             if active_order is not None:
-                live_p = await asyncio.to_thread(get_live_price)
+                live_p = await asyncio.to_thread(get_live_price, "XAU/USD")
                 if live_p is not None:
                     if order_status == "PENDING":
                         if active_order['type'] == 'Buy Stop' and live_p <= active_order['sl']:
@@ -256,7 +264,7 @@ async def fast_price_monitor_loop(bot: Bot, chat_id: str):
         await asyncio.sleep(8)
 
 async def market_scanner_loop(bot: Bot, chat_id: str):
-    global send_status_reports
+    global send_status_reports, assets_mode
     while True:
         try:
             await wait_for_next_check()
@@ -265,12 +273,12 @@ async def market_scanner_loop(bot: Bot, chat_id: str):
             # ضمان إرسال التقرير الدوري بغض النظر عن حالة إغلاق السوق لتأكيد النشاط
             if send_status_reports and (event in ["NO_SIGNAL", "MARKET_CLOSED", "STILL_PENDING", "STILL_TRIGGERED", "NEWS_PAUSE"]):
                 market_text = " (عطلة/مغلق)" if event == "MARKET_CLOSED" else ""
+                current_assets_count = len(ASSET_LISTS.get(assets_mode, []))
                 status_msg = (
-                    f"🔍 **تقرير فحص السوق (نشط){market_text}**\n"
-                    f"⏱ **التوقيت:** {time.strftime('%H:%M')} | **XAUUSD**\n\n"
-                    f"📊 **سعر المنصة:** `{spot_price}`\n"
-                    f"📈 **RSI:** `{rsi}` | **الآجل/الفوري:** `{basis}`\n\n"
-                    f"⚙️ *البوت يعمل بنجاح ولا توجد إشارة جديدة.*"
+                    f"🔍 **تقرير فحص السوق الدوري{market_text}**\n"
+                    f"⏱ **التوقيت:** {time.strftime('%H:%M')}\n"
+                    f"🌐 **نطاق المسح الحالي:** {assets_mode}\n\n"
+                    f"⚙️ *البوت يعمل بنجاح على فحص {current_assets_count} أصل/رموز.*"
                 )
                 await bot.send_message(chat_id=chat_id, text=status_msg, parse_mode="Markdown")
             elif order and event == "NEW_ORDER":
@@ -294,33 +302,46 @@ async def market_scanner_loop(bot: Bot, chat_id: str):
 # 5. لوحة التحكم والمعالجة النصية
 # ================= ================= =================
 def build_settings_keyboard():
-    global send_status_reports, strategy_mode, news_filter_active, risk_percentage, account_balance_cents
+    global send_status_reports, strategy_mode, news_filter_active, risk_percentage, account_balance_cents, assets_mode
     report_btn_text = "🔴 إيقاف التقرير الدوري" if send_status_reports else "🟢 تشغيل التقرير الدوري"
     mode_btn_text = "🎯 النمط: مرن (إشارات أكثر)" if strategy_mode == "flexible" else "🛡 النمط: مشدد (إشارات أقل)"
     news_btn_text = "🟢 فلتر الأخبار: مفعل" if news_filter_active else "🔴 فلتر الأخبار: معطل"
     risk_btn_text = f"🎯 نسبة المخاطرة: {risk_percentage}%"
     bal_btn_text = f"💰 الرصيد: {account_balance_cents} سنت (اضغط للتغيير)"
+    
+    # أزرار اختيار نطاق التداول
+    gold_btn = f"{'✅ ' if assets_mode == 'GOLD_ONLY' else ''}🟡 الذهب فقط"
+    forex_btn = f"{'✅ ' if assets_mode == 'GOLD_FOREX' else ''}💱 الذهب والعملات"
+    stocks_btn = f"{'✅ ' if assets_mode == 'STOCKS_ONLY' else ''}📈 الأسهم فقط"
+    all_btn = f"{'✅ ' if assets_mode == 'ALL' else ''}🚀 الكل (ذهب + عملات + أسهم)"
+
     keyboard = [
         [InlineKeyboardButton(report_btn_text, callback_data="toggle_report")],
         [InlineKeyboardButton(mode_btn_text, callback_data="toggle_mode")],
         [InlineKeyboardButton(news_btn_text, callback_data="toggle_news")],
         [InlineKeyboardButton(risk_btn_text, callback_data="toggle_risk")],
-        [InlineKeyboardButton(bal_btn_text, callback_data="prompt_balance")]
+        [InlineKeyboardButton(bal_btn_text, callback_data="prompt_balance")],
+        [InlineKeyboardButton(gold_btn, callback_data="set_assets_GOLD_ONLY")],
+        [InlineKeyboardButton(forex_btn, callback_data="set_assets_GOLD_FOREX")],
+        [InlineKeyboardButton(stocks_btn, callback_data="set_assets_STOCKS_ONLY")],
+        [InlineKeyboardButton(all_btn, callback_data="set_assets_ALL")]
     ]
     return InlineKeyboardMarkup(keyboard)
 
 async def handle_settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global send_status_reports, strategy_mode, news_filter_active, risk_percentage, account_balance_cents
+    global send_status_reports, strategy_mode, news_filter_active, risk_percentage, account_balance_cents, assets_mode
     rep_status = "مُفعل 🟢" if send_status_reports else "معطل 🔴"
     mode_status = "مرن ⚡️" if strategy_mode == "flexible" else "مشدد 🛡"
     news_status = "مُفعل 📰" if news_filter_active else "معطل ❌"
+    
     await update.message.reply_text(
         f"⚙️ **لوحة تحكم إعدادات البوت**\n\n"
         f"▪️ التقرير الدوري كل 5 دقائق: **{rep_status}**\n"
         f"▪️ نمط الفلترة والتداول: **{mode_status}**\n"
         f"▪️ فلتر الأخبار الاقتصادية: **{news_status}**\n"
         f"▪️ نسبة المخاطرة: **{risk_percentage}%**\n"
-        f"▪️ رصيد الحساب الحالي: **{account_balance_cents} سنت**\n\n"
+        f"▪️ رصيد الحساب الحالي: **{account_balance_cents} سنت**\n"
+        f"▪️ نطاق المسح الحالي: **{assets_mode}**\n\n"
         f"💡 *لتغيير الرصيد يدوياً، أرسل رسالة بالصيغة:* `balance 150000`",
         reply_markup=build_settings_keyboard(),
         parse_mode="Markdown"
@@ -340,9 +361,10 @@ async def handle_text_messages(update: Update, context: ContextTypes.DEFAULT_TYP
             await update.message.reply_text("❌ **خطأ في الصيغة!** اكتب الكلمة متبوعة بالرقم فقط، مثال:\n`balance 150000`", parse_mode="Markdown")
 
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global send_status_reports, strategy_mode, news_filter_active, risk_percentage, account_balance_cents
+    global send_status_reports, strategy_mode, news_filter_active, risk_percentage, account_balance_cents, assets_mode
     query = update.callback_query
     await query.answer()
+    
     if query.data == "toggle_report":
         send_status_reports = not send_status_reports
     elif query.data == "toggle_mode":
@@ -354,16 +376,21 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif query.data == "prompt_balance":
         await query.message.reply_text("✏️ **لإدخال قيمة الرصيد يدوياً:**\nأرسل رسالة تحتوي على كلمة `balance` ثم رقم الرصيد بالسنت.\n\nمثال: `balance 250000`", parse_mode="Markdown")
         return
+    elif query.data.startswith("set_assets_"):
+        assets_mode = query.data.replace("set_assets_", "")
+
     rep_status = "مُفعل 🟢" if send_status_reports else "معطل 🔴"
     mode_status = "مرن ⚡️" if strategy_mode == "flexible" else "مشدد 🛡"
     news_status = "مُفعل 📰" if news_filter_active else "معطل ❌"
+    
     await query.edit_message_text(
         f"⚙️ **لوحة تحكم إعدادات البوت**\n\n"
         f"▪️ التقرير الدوري كل 5 دقائق: **{rep_status}**\n"
         f"▪️ نمط الفلترة والتداول: **{mode_status}**\n"
         f"▪️ فلتر الأخبار الاقتصادية: **{news_status}**\n"
         f"▪️ نسبة المخاطرة: **{risk_percentage}%**\n"
-        f"▪️ رصيد الحساب الحالي: **{account_balance_cents} سنت**",
+        f"▪️ رصيد الحساب الحالي: **{account_balance_cents} سنت**\n"
+        f"▪️ نطاق المسح الحالي: **{assets_mode}**",
         reply_markup=build_settings_keyboard(),
         parse_mode="Markdown"
     )
