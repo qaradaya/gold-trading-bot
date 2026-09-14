@@ -25,7 +25,7 @@ active_orders = {}
 send_status_reports = True  
 strategy_mode = "flexible"   
 news_filter_active = True
-account_balance_cents = 200000  # 2,000 دولار
+account_balance_cents = 200000  # 2,000 دولار (بالسنت)
 risk_percentage = 0.5           
 
 # إعداد مفاتيح الـ API الأساسية والثانوية
@@ -87,7 +87,6 @@ async def fetch_twelve_data(endpoint_path):
         res = await asyncio.to_thread(fetch_url, url, 6)
         
         if res and isinstance(res, dict) and res.get("status_code") == 429:
-            # التبديل للمفتاح الثانوي فوراً عند نفاذ الكوتا
             current_key_idx = (current_key_idx + 1) % len(API_KEYS)
             print(f"⚠️ API Limit Reached! Switched to API Key Index: {current_key_idx}")
             continue
@@ -272,7 +271,6 @@ async def order_monitor_loop(bot: Bot, chat_id: str):
                 for sym in symbols_to_remove:
                     if sym in active_orders: del active_orders[sym]
 
-            # تكرار الفحص كل 5 دقائق للصفقات النشطة فقط
             await asyncio.sleep(300)
         except Exception as e:
             print(f"Monitor Loop Exception: {e}")
@@ -318,61 +316,150 @@ async def market_scanner_loop(bot: Bot, chat_id: str):
         await asyncio.sleep(10)
 
 # ================= ================= =================
-# 6. لوحة التحكم والتشغيل الرئيسي
+# 6. لوحة التحكم والمعالجة النصية
 # ================= ================= =================
 def build_settings_keyboard():
+    current_label = ASSET_MODES[selected_mode]["label"]
+    symbol_btn_text = f"🌐 النطاق: {current_label}"
+    report_btn_text = "🔴 إيقاف نبض الحياة" if send_status_reports else "🟢 تشغيل نبض الحياة"
+    mode_btn_text = "🎯 النمط: مرن (إشارات أكثر)" if strategy_mode == "flexible" else "🛡 النمط: مشدد (إشارات أقل)"
+    news_btn_text = "🟢 فلتر الأخبار: مفعل" if news_filter_active else "🔴 فلتر الأخبار: معطل"
+    risk_btn_text = f"🎯 نسبة المخاطرة: {risk_percentage}%"
+    bal_btn_text = f"💰 الرصيد: {account_balance_cents} سنت (اضغط للتغيير)"
+
     keyboard = [
-        [InlineKeyboardButton(f"🌐 النطاق: {ASSET_MODES[selected_mode]['label']}", callback_data="menu_asset_modes")],
-        [InlineKeyboardButton("🔴 إيقاف نبض الحياة" if send_status_reports else "🟢 تشغيل نبض الحياة", callback_data="toggle_report")],
-        [InlineKeyboardButton(f"🎯 النمط: {'مرن' if strategy_mode == 'flexible' else 'مشدد'}", callback_data="toggle_mode")],
-        [InlineKeyboardButton(f"🎯 نسبة المخاطرة: {risk_percentage}%", callback_data="toggle_risk")]
+        [InlineKeyboardButton(symbol_btn_text, callback_data="menu_asset_modes")],
+        [InlineKeyboardButton(report_btn_text, callback_data="toggle_report")],
+        [InlineKeyboardButton(mode_btn_text, callback_data="toggle_mode")],
+        [InlineKeyboardButton(news_btn_text, callback_data="toggle_news")],
+        [InlineKeyboardButton(risk_btn_text, callback_data="toggle_risk")],
+        [InlineKeyboardButton(bal_btn_text, callback_data="prompt_balance")]
     ]
     return InlineKeyboardMarkup(keyboard)
 
 def build_asset_modes_keyboard():
-    return InlineKeyboardMarkup([
+    keyboard = [
         [InlineKeyboardButton("🟡 الذهب فقط", callback_data="set_mode_gold_only")],
-        [InlineKeyboardButton("الذهب والعملات 💱", callback_data="set_mode_gold_forex")],
-        [InlineKeyboardButton("الأسهم فقط 📈", callback_data="set_mode_stocks_only")],
-        [InlineKeyboardButton("الكل 🚀", callback_data="set_mode_all")]
-    ])
+        [InlineKeyboardButton("الذهب والعملات 💱 (EUR/USD, GBP/USD, USD/JPY)", callback_data="set_mode_gold_forex")],
+        [InlineKeyboardButton("الأسهم فقط 📈 (TSLA, NVDA, AMD, AAPL)", callback_data="set_mode_stocks_only")],
+        [InlineKeyboardButton("الكل (ذهب + عملات + أسهم) 🚀", callback_data="set_mode_all")],
+        [InlineKeyboardButton("🔙 العودة للإعدادات", callback_data="back_to_settings")]
+    ]
+    return InlineKeyboardMarkup(keyboard)
 
 async def handle_settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("⚙️ **لوحة إعدادات البوت**", reply_markup=build_settings_keyboard(), parse_mode="Markdown")
+    rep_status = "مُفعل 🟢" if send_status_reports else "معطل 🔴"
+    mode_status = "مرن ⚡️" if strategy_mode == "flexible" else "مشدد 🛡"
+    news_status = "مُفعل 📰" if news_filter_active else "معطل ❌"
+    current_label = ASSET_MODES[selected_mode]["label"]
+    
+    await update.message.reply_text(
+        f"⚙️ **لوحة تحكم إعدادات البوت**\n\n"
+        f"🌐 النطاق المفعل حالياً: **{current_label}**\n"
+        f"▪️ تقرير نبض الحياة الدوري: **{rep_status}**\n"
+        f"▪️ نمط الفلترة والتداول: **{mode_status}**\n"
+        f"▪️ فلتر الأخبار الاقتصادية: **{news_status}**\n"
+        f"▪️ نسبة المخاطرة: **{risk_percentage}%**\n"
+        f"▪️ رصيد الحساب الحالي: **{account_balance_cents} سنت**\n\n"
+        f"💡 *لتغيير الرصيد يدوياً، أرسل رسالة بالصيغة:* `balance 150000`",
+        reply_markup=build_settings_keyboard(),
+        parse_mode="Markdown"
+    )
+
+async def handle_text_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global account_balance_cents
+    text = update.message.text.strip()
+    
+    if text.lower().startswith("balance ") or text.lower().startswith("رصيد "):
+        try:
+            val = int(text.split()[1])
+            account_balance_cents = val
+            await update.message.reply_text(f"✅ **تم تحديث رصيد الحساب بنجاح إلى:** `{account_balance_cents}` سنت", parse_mode="Markdown")
+        except Exception:
+            await update.message.reply_text("❌ **خطأ في الصيغة!** اكتب الكلمة متبوعة بالرقم فقط، مثال:\n`balance 150000`", parse_mode="Markdown")
 
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global send_status_reports, strategy_mode, risk_percentage, selected_mode
+    global send_status_reports, strategy_mode, news_filter_active, risk_percentage, selected_mode
     query = update.callback_query
     await query.answer()
 
-    if query.data == "toggle_report": send_status_reports = not send_status_reports
-    elif query.data == "toggle_mode": strategy_mode = "strict" if strategy_mode == "flexible" else "flexible"
-    elif query.data == "toggle_risk": risk_percentage = 1.0 if risk_percentage == 0.5 else 0.5
+    if query.data == "toggle_report":
+        send_status_reports = not send_status_reports
+    elif query.data == "toggle_mode":
+        strategy_mode = "strict" if strategy_mode == "flexible" else "flexible"
+    elif query.data == "toggle_news":
+        news_filter_active = not news_filter_active
+    elif query.data == "toggle_risk":
+        risk_percentage = 1.0 if risk_percentage == 0.5 else (2.0 if risk_percentage == 1.0 else 0.5)
+    elif query.data == "prompt_balance":
+        await query.message.reply_text("✏️ **لإدخال قيمة الرصيد يدوياً:**\nأرسل رسالة تحتوي على كلمة `balance` ثم رقم الرصيد بالسنت.\n\nمثال: `balance 250000`", parse_mode="Markdown")
+        return
     elif query.data == "menu_asset_modes":
-        await query.edit_message_text("📊 **اختر نطاق الأصول:**", reply_markup=build_asset_modes_keyboard(), parse_mode="Markdown")
+        await query.edit_message_text(
+            "📊 **اختر نطاق الأصول المراد متابعتها وتحليلها:**",
+            reply_markup=build_asset_modes_keyboard(),
+            parse_mode="Markdown"
+        )
         return
     elif query.data.startswith("set_mode_"):
-        selected_mode = query.data.replace("set_mode_", "")
+        mode_key = query.data.replace("set_mode_", "")
+        if mode_key in ASSET_MODES:
+            selected_mode = mode_key
+            await query.edit_message_text(
+                f"✅ **تم تحديث نطاق التداول إلى:** {ASSET_MODES[selected_mode]['label']}",
+                parse_mode="Markdown"
+            )
+            await asyncio.sleep(1)
+    elif query.data == "back_to_settings":
+        pass
 
-    await query.edit_message_text("⚙️ **تم تحديث الإعدادات**", reply_markup=build_settings_keyboard(), parse_mode="Markdown")
+    rep_status = "مُفعل 🟢" if send_status_reports else "معطل 🔴"
+    mode_status = "مرن ⚡️" if strategy_mode == "flexible" else "مشدد 🛡"
+    news_status = "مُفعل 📰" if news_filter_active else "معطل ❌"
+    current_label = ASSET_MODES[selected_mode]["label"]
+
+    try:
+        await query.edit_message_text(
+            f"⚙️ **لوحة تحكم إعدادات البوت**\n\n"
+            f"🌐 النطاق المفعل حالياً: **{current_label}**\n"
+            f"▪️ تقرير نبض الحياة الدوري: **{rep_status}**\n"
+            f"▪️ نمط الفلترة والتداول: **{mode_status}**\n"
+            f"▪️ فلتر الأخبار الاقتصادية: **{news_status}**\n"
+            f"▪️ نسبة المخاطرة: **{risk_percentage}%**\n"
+            f"▪️ رصيد الحساب الحالي: **{account_balance_cents} سنت**",
+            reply_markup=build_settings_keyboard(),
+            parse_mode="Markdown"
+        )
+    except Exception:
+        pass
+
+# ================= ================= =================
+# 7. التشغيل الرئيسي وربط الخلفية
+# ================= ================= =================
+async def post_init(application: Application):
+    """تضمن هذه الدالة تشغيل المهام الخلفية داخل حلقة asyncio الرسمية للتليجرام"""
+    chat_id = os.environ.get("CHAT_ID")
+    if chat_id:
+        asyncio.create_task(market_scanner_loop(application.bot, chat_id))
+        asyncio.create_task(order_monitor_loop(application.bot, chat_id))
+        asyncio.create_task(heartbeat_loop(application.bot, chat_id))
 
 def main():
     token = os.environ.get("TELEGRAM_TOKEN")
-    chat_id = os.environ.get("CHAT_ID")
-    if not token or not chat_id: return
+    if not token:
+        print("TELEGRAM_TOKEN environment variable is missing!")
+        return
 
     Thread(target=run_web_server, daemon=True).start()
-    app_bot = Application.builder().token(token).build()
 
-    app_bot.add_handler(CommandHandler("settings", handle_settings))
+    app_bot = Application.builder().token(token).post_init(post_init).build()
+
+    # Regex مرن يستجيب لكل الحالات: /settings, settings, Settings, /Settings
+    app_bot.add_handler(MessageHandler(filters.Regex(r'(?i)^/?settings$'), handle_settings))
+    app_bot.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_messages))
     app_bot.add_handler(CallbackQueryHandler(button_callback))
 
-    loop = asyncio.get_event_loop()
-    loop.create_task(market_scanner_loop(app_bot.bot, chat_id))
-    loop.create_task(order_monitor_loop(app_bot.bot, chat_id))
-    loop.create_task(heartbeat_loop(app_bot.bot, chat_id))
-
-    print("Smart M15 Bot Active...")
+    print("Smart M15 Bot Active & Listening...")
     app_bot.run_polling()
 
 if __name__ == "__main__":
