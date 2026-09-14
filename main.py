@@ -25,7 +25,7 @@ active_orders = {}  # حفظ الصفقات المفعلة لكل رمز {symbol
 send_status_reports = True  
 strategy_mode = "flexible"   
 news_filter_active = True
-account_balance_cents = 200000  # رصيد الحساب بالسنت
+account_balance_cents = 200000  # رصيد الحساب بالسنت (200,000 سنت = 2,000 دولار)
 risk_percentage = 0.5           # نسبة المخاطرة الافتراضية 0.5%
 
 # أقسام التداول والتصفية
@@ -58,7 +58,7 @@ async def wait_for_next_check():
         await asyncio.sleep(1)
 
 # ================= ================= =================
-# 2. فلتر الأخبار وحاسبة اللوت
+# 2. فلتر الأخبار وحاسبة اللوت المحدثة
 # ================= ================= =================
 def is_high_impact_news_near():
     """فحص الأخبار الاقتصادية عالية التأثير على الدولار (USD)"""
@@ -81,18 +81,32 @@ def is_high_impact_news_near():
         print(f"News API Error: {e}")
     return False, ""
 
-def calculate_recommended_lot(entry_price, stop_loss_price):
-    """حساب حجم اللوت التلقائي بناءً على رصيد الحساب وسعر الستوب"""
+def calculate_recommended_lot(symbol, entry_price, stop_loss_price):
+    """حساب حجم اللوت التلقائي الصحيح بناءً على نوع الأصل والرصيد بالسنت"""
     try:
         risk_amount_cents = account_balance_cents * (risk_percentage / 100.0)
-        pips_at_risk = abs(entry_price - stop_loss_price)
-        if pips_at_risk == 0:
+        price_distance = abs(entry_price - stop_loss_price)
+        
+        if price_distance == 0:
             return 0.10
-        pip_value_per_cent_lot = 10.0
-        raw_lot = risk_amount_cents / (pips_at_risk * pip_value_per_cent_lot)
+
+        # تحديد قيمة حركة السعر بالسنت بناءً على نوع الأصل لحسابات السنت
+        if symbol == "XAU/USD":
+            # حركة 1.00 دولار في الذهب تعادل 100 سنت ربح/خسارة لكل 1 لوت سنت
+            cost_per_point = 100.0  
+        elif "/" in symbol:
+            # الأزواج المباشرة للعملات (EUR/USD, GBP/USD...)
+            # حركة 0.0001 (1 بيب) تعادل 10 سنت لكل 1 لوت سنت
+            cost_per_point = 100000.0
+        else:
+            # الأسهم (TSLA, NVDA, AAPL...)
+            # حركة 1.00 دولار بالسهم تعادل 100 سنت لكل 1 لوت سنت
+            cost_per_point = 100.0
+
+        raw_lot = risk_amount_cents / (price_distance * cost_per_point)
         return max(0.01, round(raw_lot, 2))
     except Exception as e:
-        print(f"Error calculating lot: {e}")
+        print(f"Error calculating lot for {symbol}: {e}")
         return 0.10
 
 # ================= ================= =================
@@ -139,7 +153,7 @@ def analyze_symbol(symbol):
     global active_orders, strategy_mode
     
     now_utc = datetime.utcnow()
-    # عطلة نهاية الأسبوع الأسواق الماليّة
+    # عطلة نهاية الأسبوع في الأسواق المالية
     if now_utc.weekday() in [5, 6]:
         return None, "MARKET_CLOSED", 0, 0, 0, 0
         
@@ -212,6 +226,7 @@ def analyze_symbol(symbol):
         price_step = 0.50 if symbol == "XAU/USD" else (spot_price * 0.0015)
         max_risk = 10.00 if symbol == "XAU/USD" else (spot_price * 0.02)
 
+        # شراء معلق Buy Stop
         if ema20 > ema50 and (rsi_buy_min <= rsi < rsi_buy_max) and (basis_expansion >= basis_threshold or volume_surging or symbol != "XAU/USD"):
             proposed_entry = round(min(max(tight_swing_high, spot_price) + price_step, spot_price + (price_step * 5)), precision)
             sl_price = round(tight_swing_low - price_step, precision)
@@ -220,7 +235,7 @@ def analyze_symbol(symbol):
                 risk_distance = proposed_entry - sl_price
                 if risk_distance <= max_risk:
                     tp_price = round(proposed_entry + (risk_distance * 1.5), precision)
-                    rec_lot = calculate_recommended_lot(proposed_entry, sl_price)
+                    rec_lot = calculate_recommended_lot(symbol, proposed_entry, sl_price)
                     new_order = {
                         "symbol": symbol,
                         "type": "Buy Stop",
@@ -234,6 +249,7 @@ def analyze_symbol(symbol):
                     active_orders[symbol] = new_order
                     return new_order, "NEW_ORDER", spot_price, basis_current, rsi, rec_lot
 
+        # بيع معلق Sell Stop
         elif ema20 < ema50 and (rsi_sell_min < rsi <= rsi_sell_max) and (basis_expansion <= -basis_threshold or volume_surging or symbol != "XAU/USD"):
             proposed_entry = round(max(min(tight_swing_low, spot_price) - price_step, spot_price - (price_step * 5)), precision)
             sl_price = round(tight_swing_high + price_step, precision)
@@ -241,7 +257,7 @@ def analyze_symbol(symbol):
                 risk_distance = sl_price - proposed_entry
                 if risk_distance <= max_risk:
                     tp_price = round(proposed_entry - (risk_distance * 1.5), precision)
-                    rec_lot = calculate_recommended_lot(proposed_entry, sl_price)
+                    rec_lot = calculate_recommended_lot(symbol, proposed_entry, sl_price)
                     new_order = {
                         "symbol": symbol,
                         "type": "Sell Stop",
