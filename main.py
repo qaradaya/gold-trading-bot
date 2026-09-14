@@ -11,8 +11,9 @@ from telegram.ext import Application, CommandHandler, CallbackQueryHandler, Cont
 app = Flask(__name__)
 
 @app.route('/')
+@app.route('/ping')
 def home():
-    return "Pro Scalper M15 Multi-Asset Bot is Live!"
+    return "Pro Scalper M15 Multi-Asset Bot is Live and Active!"
 
 def run_web_server():
     port = int(os.environ.get("PORT", 10000))
@@ -22,20 +23,22 @@ def run_web_server():
 # 1. المتغيرات العامة والإعدادات
 # ================= ================= =================
 active_orders = {}  
-send_status_reports = True  
+send_status_reports = True    # التحكم بنبض الحياة فقط
 strategy_mode = "flexible"   
 news_filter_active = True
-account_balance_cents = 200000  # 2,000 دولار (بالسنت)
+account_balance_cents = 200000  
 risk_percentage = 0.5           
-
-# إعداد مفاتيح الـ API الأساسية والثانوية
-API_KEYS = []
-key1 = os.environ.get("TWELVE_DATA_API_KEY")
-key2 = os.environ.get("TWELVE_DATA_API_KEY_2") # مفتاح احتياطي ثانوي
-if key1: API_KEYS.append(key1)
-if key2: API_KEYS.append(key2)
-
 current_key_idx = 0
+last_scanned_candle = ""     # لمنع تكرار مسح نفس الشمعة
+
+def get_all_api_keys():
+    """جلب جميع مفاتيح API من متغيرات البيئة"""
+    keys = []
+    for k, v in os.environ.items():
+        if k.startswith("TWELVE_DATA_API_KEY") and v.strip():
+            if v.strip() not in keys:
+                keys.append(v.strip())
+    return keys
 
 ASSET_MODES = {
     "gold_only": {
@@ -59,9 +62,9 @@ ASSET_MODES = {
 selected_mode = "gold_only"
 
 # ================= ================= =================
-# 2. محرك طلبات الـ API الذكي (التبديل التلقائي)
+# 2. محرك طلبات الـ API مع التبديل التلقائي
 # ================= ================= =================
-def fetch_url(url, timeout=5):
+def fetch_url(url, timeout=6):
     try:
         res = requests.get(url, timeout=timeout)
         if res.status_code == 200:
@@ -76,34 +79,31 @@ def fetch_url(url, timeout=5):
     return None
 
 async def fetch_twelve_data(endpoint_path):
-    global current_key_idx, API_KEYS
-    if not API_KEYS:
+    global current_key_idx
+    api_keys = get_all_api_keys()
+    if not api_keys:
+        print("❌ Error: No Twelve Data API keys found in Environment Variables!")
         return None
 
-    attempts = len(API_KEYS)
+    attempts = len(api_keys)
     for _ in range(attempts):
-        active_key = API_KEYS[current_key_idx]
+        if current_key_idx >= len(api_keys):
+            current_key_idx = 0
+            
+        active_key = api_keys[current_key_idx]
         url = f"https://api.twelvedata.com/{endpoint_path}&apikey={active_key}"
         res = await asyncio.to_thread(fetch_url, url, 6)
         
         if res and isinstance(res, dict) and res.get("status_code") == 429:
-            current_key_idx = (current_key_idx + 1) % len(API_KEYS)
+            current_key_idx = (current_key_idx + 1) % len(api_keys)
             print(f"⚠️ API Limit Reached! Switched to API Key Index: {current_key_idx}")
             continue
         return res
     return {"status_code": 429}
 
 # ================= ================= =================
-# 3. إدارة التوقيت وحاسبة اللوت
+# 3. إدارة الأخبار وحاسبة اللوت
 # ================= ================= =================
-async def wait_for_m15_close():
-    """الانتظار حتى لحظة إغلاق شمعة M15 (الدقيقة 00, 15, 30, 45)"""
-    while True:
-        now = datetime.utcnow()
-        if now.minute % 15 == 0 and now.second < 3:
-            break
-        await asyncio.sleep(1)
-
 async def is_high_impact_news_near():
     if not news_filter_active:
         return False, ""
@@ -141,6 +141,8 @@ def calculate_recommended_lot(symbol, entry_price, stop_loss_price):
 # 4. التحليل الفني
 # ================= ================= =================
 def calculate_rsi(closes, window=14):
+    if len(closes) < window + 1:
+        return 50.0
     gains, losses = [], []
     for i in range(1, len(closes)):
         delta = closes[i] - closes[i-1]
@@ -157,6 +159,7 @@ def calculate_rsi(closes, window=14):
     return round(100 - (100 / (1 + rs)), 2)
 
 def calculate_ema(data, window):
+    if not data: return [0]
     weights = [2 / (window + 1)]
     ema = [data[0]]
     for price in data[1:]:
@@ -173,15 +176,15 @@ async def analyze_symbol(symbol):
     global active_orders, strategy_mode
     
     if datetime.utcnow().weekday() in [5, 6]:
-        return None, "MARKET_CLOSED", 0, 0, 0
+        return None, "الماركت مغلق", 0, 0, 0
         
     has_news, _ = await is_high_impact_news_near()
     if has_news:
-        return None, "NEWS_PAUSE", 0, 0, 0
+        return None, "توقف للأخبار", 0, 0, 0
 
     res_spot = await fetch_twelve_data(f"time_series?symbol={symbol}&interval=15min&outputsize=40")
     if not res_spot or res_spot.get("status_code") == 429 or "values" not in res_spot:
-        return None, "API_LIMIT", 0, 0, 0
+        return None, "خطأ في الـ API", 0, 0, 0
         
     spot_values = res_spot["values"]
     spot_values.reverse()
@@ -199,7 +202,7 @@ async def analyze_symbol(symbol):
     tight_swing_low = min(spot_lows[-3:-1])
 
     if symbol in active_orders:
-        return active_orders[symbol], "ACTIVE", spot_price, rsi, 0
+        return active_orders[symbol], "صفقة قائمة", spot_price, rsi, 0
 
     rsi_buy_max = 75 if strategy_mode == "flexible" else 68
     rsi_buy_min = 30  
@@ -233,13 +236,79 @@ async def analyze_symbol(symbol):
                 active_orders[symbol] = new_order
                 return new_order, "NEW_ORDER", spot_price, rsi, rec_lot
 
-    return None, "NO_SIGNAL", spot_price, rsi, 0
+    return None, "لا توجد إشارة", spot_price, rsi, 0
 
 # ================= ================= =================
-# 5. حلقات الفحص الذكي ومراقبة الصفقات
+# 5. الحلقات المستقلة (المسح والمراقبة ونبض الحياة)
 # ================= ================= =================
+async def market_scanner_loop(bot: Bot, chat_id: str):
+    """حلقة المسح المستقلة تماماً: تفحص الأسواق عند كل شمعة M15 وترسل تقريراً دائماً"""
+    global last_scanned_candle, selected_mode
+    print("🚀 Market Scanner Loop Started...")
+    
+    while True:
+        try:
+            now = datetime.utcnow()
+            # الفحص عند الدقائق :00, :15, :30, :45
+            if now.minute % 15 == 0:
+                candle_id = now.strftime("%Y-%m-%d %H:%M")
+                
+                if candle_id != last_scanned_candle:
+                    last_scanned_candle = candle_id
+                    print(f"⏰ [M15 Triggered] Candle Close: {candle_id} UTC")
+                    
+                    current_symbols = ASSET_MODES[selected_mode]["symbols"]
+                    scan_results = []
+                    signals_found = []
+                    
+                    for sym in current_symbols:
+                        try:
+                            order, event, spot_price, rsi, rec_lot = await analyze_symbol(sym)
+                            scan_results.append((sym, spot_price, rsi, event))
+                            
+                            if order and event == "NEW_ORDER":
+                                signals_found.append((sym, order, spot_price, rsi))
+                        except Exception as sym_err:
+                            print(f"Error scanning {sym}: {sym_err}")
+                            scan_results.append((sym, 0, 0, "خطأ بالاتصال"))
+                        
+                        await asyncio.sleep(1) # فاصل زمني بين الطلبات
+
+                    # 1. إرسال تنبيهات الإشارات الفورية إن وجدت
+                    for sym, order, spot_price, rsi in signals_found:
+                        emoji = "🟢" if order['type'] == "Buy Stop" else "🔴"
+                        msg = (
+                            f"⚡️ **إشارة جديدة (شمعة M15 مكتملة)**\n"
+                            f"⏱ **التوقيت:** {now.strftime('%H:%M')} UTC | **{sym}**\n\n"
+                            f"📊 **السعر:** `{spot_price}` | **RSI:** `{rsi}`\n"
+                            f"{emoji} **النوع:** {order['type']}\n"
+                            f"🎯 **الدخول:** `{order['entry']}`\n"
+                            f"🟢 **الهدف:** `{order['tp']}` | 🔴 **الستوب:** `{order['sl']}`\n\n"
+                            f"💰 **اللوت المقترح:** `{order['lot']}` | المخاطرة: {risk_percentage}%"
+                        )
+                        await bot.send_message(chat_id=chat_id, text=msg, parse_mode="Markdown")
+
+                    # 2. إرسال تقرير المسح الدوري الدائم (حتى لو لم توجد إشارة)
+                    summary_lines = []
+                    for sym, price, rsi, status in scan_results:
+                        summary_lines.append(f"▫️ **{sym}:** السعر `{price}` | RSI `{rsi}` ({status})")
+                    
+                    summary_msg = (
+                        f"📊 **تقرير مسح شمعة M15 مكتملة**\n"
+                        f"⏱ **التوقيت:** `{now.strftime('%H:%M')} UTC`\n"
+                        f"🌐 **النطاق:** {ASSET_MODES[selected_mode]['label']}\n\n"
+                        + "\n".join(summary_lines) + "\n\n"
+                        f"✅ **الحالة:** تم طلب الأسعار وتحليل الشمعة بنجاح."
+                    )
+                    await bot.send_message(chat_id=chat_id, text=summary_msg, parse_mode="Markdown")
+
+        except Exception as e:
+            print(f"Scanner Loop Exception: {e}")
+            
+        await asyncio.sleep(5) # التحقق كل 5 ثوانٍ لضمان عدم تفويت الدقيقة
+
 async def order_monitor_loop(bot: Bot, chat_id: str):
-    """تستيقظ كل 5 دقائق فقط في حال وجود صفقات معلقة أو مفعلة لمتابعة الأهداف والستوب"""
+    """مراقبة أهداف واستوبات الصفقات المفتوحة"""
     global active_orders
     while True:
         try:
@@ -271,100 +340,70 @@ async def order_monitor_loop(bot: Bot, chat_id: str):
                 for sym in symbols_to_remove:
                     if sym in active_orders: del active_orders[sym]
 
-            await asyncio.sleep(300)
+            await asyncio.sleep(60)
         except Exception as e:
             print(f"Monitor Loop Exception: {e}")
-            await asyncio.sleep(60)
+            await asyncio.sleep(30)
 
 async def heartbeat_loop(bot: Bot, chat_id: str):
-    """إرسال تقرير نبض الحياة كل 5 دقائق بدون أي استهلاك لبيانات الـ API"""
+    """نبض الحياة الدوري (يعمل فقط إذا كانت الخاصية مفعّلة في الإعدادات)"""
+    last_sent_minute = -1
     while True:
         try:
-            await asyncio.sleep(300)
-            if send_status_reports:
-                msg = f"🟢 **نبض البوت:** البوت يعمل ومستيقظ بنجاح ({time.strftime('%H:%M')} UTC)."
+            now = datetime.utcnow()
+            if send_status_reports and now.minute % 5 == 0 and now.minute != last_sent_minute:
+                last_sent_minute = now.minute
+                keys_count = len(get_all_api_keys())
+                msg = (
+                    f"🟢 **نبض البوت:** مستيقظ ويعمل بنجاح ({now.strftime('%H:%M')} UTC)\n"
+                    f"🔑 **مفاتيح API النشطة:** `{keys_count}`"
+                )
                 await bot.send_message(chat_id=chat_id, text=msg, parse_mode="Markdown")
+            await asyncio.sleep(10)
         except Exception as e:
             print(f"Heartbeat Exception: {e}")
-
-async def market_scanner_loop(bot: Bot, chat_id: str):
-    """فحص السوق الفني يتم رسمياً عند إغلاق كل شمعة 15 دقيقة"""
-    global selected_mode
-    while True:
-        try:
-            await wait_for_m15_close()
-            current_symbols = ASSET_MODES[selected_mode]["symbols"]
-            
-            for sym in current_symbols:
-                order, event, spot_price, rsi, rec_lot = await analyze_symbol(sym)
-                
-                if order and event == "NEW_ORDER":
-                    emoji = "🟢" if order['type'] == "Buy Stop" else "🔴"
-                    msg = (
-                        f"⚡️ **إشارة جديدة (شمعة M15 مكتملة)**\n"
-                        f"⏱ **التوقيت:** {time.strftime('%H:%M')} | **{sym}**\n\n"
-                        f"📊 **السعر:** `{spot_price}` | **RSI:** `{rsi}`\n"
-                        f"{emoji} **النوع:** {order['type']}\n"
-                        f"🎯 **الدخول:** `{order['entry']}`\n"
-                        f"🟢 **الهدف:** `{order['tp']}` | 🔴 **الستوب:** `{order['sl']}`\n\n"
-                        f"💰 **اللوت المقترح:** `{order['lot']}` | المخاطرة: {risk_percentage}%"
-                    )
-                    await bot.send_message(chat_id=chat_id, text=msg, parse_mode="Markdown")
-                await asyncio.sleep(1)
-        except Exception as e:
-            print(f"Market Scanner Exception: {e}")
-        await asyncio.sleep(10)
+            await asyncio.sleep(30)
 
 # ================= ================= =================
-# 6. لوحة التحكم والمعالجة النصية
+# 6. لوحة التحكم وأوامر التليجرام
 # ================= ================= =================
 def build_settings_keyboard():
     current_label = ASSET_MODES[selected_mode]["label"]
-    symbol_btn_text = f"🌐 النطاق: {current_label}"
-    report_btn_text = "🔴 إيقاف نبض الحياة" if send_status_reports else "🟢 تشغيل نبض الحياة"
-    mode_btn_text = "🎯 النمط: مرن (إشارات أكثر)" if strategy_mode == "flexible" else "🛡 النمط: مشدد (إشارات أقل)"
-    news_btn_text = "🟢 فلتر الأخبار: مفعل" if news_filter_active else "🔴 فلتر الأخبار: معطل"
-    risk_btn_text = f"🎯 نسبة المخاطرة: {risk_percentage}%"
-    bal_btn_text = f"💰 الرصيد: {account_balance_cents} سنت (اضغط للتغيير)"
-
     keyboard = [
-        [InlineKeyboardButton(symbol_btn_text, callback_data="menu_asset_modes")],
-        [InlineKeyboardButton(report_btn_text, callback_data="toggle_report")],
-        [InlineKeyboardButton(mode_btn_text, callback_data="toggle_mode")],
-        [InlineKeyboardButton(news_btn_text, callback_data="toggle_news")],
-        [InlineKeyboardButton(risk_btn_text, callback_data="toggle_risk")],
-        [InlineKeyboardButton(bal_btn_text, callback_data="prompt_balance")]
+        [InlineKeyboardButton(f"🌐 النطاق: {current_label}", callback_data="menu_asset_modes")],
+        [InlineKeyboardButton("🔴 إيقاف نبض الحياة" if send_status_reports else "🟢 تشغيل نبض الحياة", callback_data="toggle_report")],
+        [InlineKeyboardButton(f"🎯 النمط: {'مرن' if strategy_mode == 'flexible' else 'مشدد'}", callback_data="toggle_mode")],
+        [InlineKeyboardButton(f"🟢 فلتر الأخبار: مفعل" if news_filter_active else "🔴 فلتر الأخبار: معطل", callback_data="toggle_news")],
+        [InlineKeyboardButton(f"🎯 نسبة المخاطرة: {risk_percentage}%", callback_data="toggle_risk")],
+        [InlineKeyboardButton(f"💰 الرصيد: {account_balance_cents} سنت", callback_data="prompt_balance")]
     ]
     return InlineKeyboardMarkup(keyboard)
 
 def build_asset_modes_keyboard():
     keyboard = [
         [InlineKeyboardButton("🟡 الذهب فقط", callback_data="set_mode_gold_only")],
-        [InlineKeyboardButton("الذهب والعملات 💱 (EUR/USD, GBP/USD, USD/JPY)", callback_data="set_mode_gold_forex")],
-        [InlineKeyboardButton("الأسهم فقط 📈 (TSLA, NVDA, AMD, AAPL)", callback_data="set_mode_stocks_only")],
-        [InlineKeyboardButton("الكل (ذهب + عملات + أسهم) 🚀", callback_data="set_mode_all")],
+        [InlineKeyboardButton("الذهب والعملات 💱", callback_data="set_mode_gold_forex")],
+        [InlineKeyboardButton("الأسهم فقط 📈", callback_data="set_mode_stocks_only")],
+        [InlineKeyboardButton("الكل 🚀", callback_data="set_mode_all")],
         [InlineKeyboardButton("🔙 العودة للإعدادات", callback_data="back_to_settings")]
     ]
     return InlineKeyboardMarkup(keyboard)
 
-async def handle_settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    rep_status = "مُفعل 🟢" if send_status_reports else "معطل 🔴"
-    mode_status = "مرن ⚡️" if strategy_mode == "flexible" else "مشدد 🛡"
-    news_status = "مُفعل 📰" if news_filter_active else "معطل ❌"
-    current_label = ASSET_MODES[selected_mode]["label"]
+async def handle_manual_scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """فحص يدوي فوري لتأكيد جلب البيانات من API"""
+    await update.message.reply_text("🔍 **جاري الفحص المباشر وإرسال طلبات الـ API...**", parse_mode="Markdown")
+    current_symbols = ASSET_MODES[selected_mode]["symbols"]
+    report = f"📊 **تقرير الفحص الفوري ({datetime.utcnow().strftime('%H:%M')} UTC):**\n\n"
     
-    await update.message.reply_text(
-        f"⚙️ **لوحة تحكم إعدادات البوت**\n\n"
-        f"🌐 النطاق المفعل حالياً: **{current_label}**\n"
-        f"▪️ تقرير نبض الحياة الدوري: **{rep_status}**\n"
-        f"▪️ نمط الفلترة والتداول: **{mode_status}**\n"
-        f"▪️ فلتر الأخبار الاقتصادية: **{news_status}**\n"
-        f"▪️ نسبة المخاطرة: **{risk_percentage}%**\n"
-        f"▪️ رصيد الحساب الحالي: **{account_balance_cents} سنت**\n\n"
-        f"💡 *لتغيير الرصيد يدوياً، أرسل رسالة بالصيغة:* `balance 150000`",
-        reply_markup=build_settings_keyboard(),
-        parse_mode="Markdown"
-    )
+    for sym in current_symbols:
+        order, event, spot_price, rsi, rec_lot = await analyze_symbol(sym)
+        report += f"▫️ **{sym}:** السعر `{spot_price}` | RSI: `{rsi}` | النتيجة: `{event}`\n"
+    
+    report += f"\n🔑 **مفاتيح API المستكشفة:** `{len(get_all_api_keys())}`"
+    await update.message.reply_text(report, parse_mode="Markdown")
+
+async def handle_settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("⚙️ **لوحة تحكم إعدادات البوت**", reply_markup=build_settings_keyboard(), parse_mode="Markdown")
 
 async def handle_text_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global account_balance_cents
@@ -374,70 +413,40 @@ async def handle_text_messages(update: Update, context: ContextTypes.DEFAULT_TYP
         try:
             val = int(text.split()[1])
             account_balance_cents = val
-            await update.message.reply_text(f"✅ **تم تحديث رصيد الحساب بنجاح إلى:** `{account_balance_cents}` سنت", parse_mode="Markdown")
+            await update.message.reply_text(f"✅ **تم تحديث الرصيد إلى:** `{account_balance_cents}` سنت", parse_mode="Markdown")
         except Exception:
-            await update.message.reply_text("❌ **خطأ في الصيغة!** اكتب الكلمة متبوعة بالرقم فقط، مثال:\n`balance 150000`", parse_mode="Markdown")
+            await update.message.reply_text("❌ صيغة خاطئة! أرسل: `balance 200000`", parse_mode="Markdown")
 
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global send_status_reports, strategy_mode, news_filter_active, risk_percentage, selected_mode
     query = update.callback_query
     await query.answer()
 
-    if query.data == "toggle_report":
+    if query.data == "toggle_report": 
         send_status_reports = not send_status_reports
-    elif query.data == "toggle_mode":
+    elif query.data == "toggle_mode": 
         strategy_mode = "strict" if strategy_mode == "flexible" else "flexible"
-    elif query.data == "toggle_news":
+    elif query.data == "toggle_news": 
         news_filter_active = not news_filter_active
-    elif query.data == "toggle_risk":
-        risk_percentage = 1.0 if risk_percentage == 0.5 else (2.0 if risk_percentage == 1.0 else 0.5)
-    elif query.data == "prompt_balance":
-        await query.message.reply_text("✏️ **لإدخال قيمة الرصيد يدوياً:**\nأرسل رسالة تحتوي على كلمة `balance` ثم رقم الرصيد بالسنت.\n\nمثال: `balance 250000`", parse_mode="Markdown")
-        return
+    elif query.data == "toggle_risk": 
+        risk_percentage = 1.0 if risk_percentage == 0.5 else 0.5
     elif query.data == "menu_asset_modes":
-        await query.edit_message_text(
-            "📊 **اختر نطاق الأصول المراد متابعتها وتحليلها:**",
-            reply_markup=build_asset_modes_keyboard(),
-            parse_mode="Markdown"
-        )
+        await query.edit_message_text("📊 **اختر نطاق الأصول:**", reply_markup=build_asset_modes_keyboard(), parse_mode="Markdown")
         return
     elif query.data.startswith("set_mode_"):
-        mode_key = query.data.replace("set_mode_", "")
-        if mode_key in ASSET_MODES:
-            selected_mode = mode_key
-            await query.edit_message_text(
-                f"✅ **تم تحديث نطاق التداول إلى:** {ASSET_MODES[selected_mode]['label']}",
-                parse_mode="Markdown"
-            )
-            await asyncio.sleep(1)
+        selected_mode = query.data.replace("set_mode_", "")
     elif query.data == "back_to_settings":
         pass
 
-    rep_status = "مُفعل 🟢" if send_status_reports else "معطل 🔴"
-    mode_status = "مرن ⚡️" if strategy_mode == "flexible" else "مشدد 🛡"
-    news_status = "مُفعل 📰" if news_filter_active else "معطل ❌"
-    current_label = ASSET_MODES[selected_mode]["label"]
-
     try:
-        await query.edit_message_text(
-            f"⚙️ **لوحة تحكم إعدادات البوت**\n\n"
-            f"🌐 النطاق المفعل حالياً: **{current_label}**\n"
-            f"▪️ تقرير نبض الحياة الدوري: **{rep_status}**\n"
-            f"▪️ نمط الفلترة والتداول: **{mode_status}**\n"
-            f"▪️ فلتر الأخبار الاقتصادية: **{news_status}**\n"
-            f"▪️ نسبة المخاطرة: **{risk_percentage}%**\n"
-            f"▪️ رصيد الحساب الحالي: **{account_balance_cents} سنت**",
-            reply_markup=build_settings_keyboard(),
-            parse_mode="Markdown"
-        )
+        await query.edit_message_text("⚙️ **تم تحديث الإعدادات**", reply_markup=build_settings_keyboard(), parse_mode="Markdown")
     except Exception:
         pass
 
 # ================= ================= =================
-# 7. التشغيل الرئيسي وربط الخلفية
+# 7. التشغيل الرئيسي
 # ================= ================= =================
 async def post_init(application: Application):
-    """تضمن هذه الدالة تشغيل المهام الخلفية داخل حلقة asyncio الرسمية للتليجرام"""
     chat_id = os.environ.get("CHAT_ID")
     if chat_id:
         asyncio.create_task(market_scanner_loop(application.bot, chat_id))
@@ -446,20 +455,19 @@ async def post_init(application: Application):
 
 def main():
     token = os.environ.get("TELEGRAM_TOKEN")
-    if not token:
-        print("TELEGRAM_TOKEN environment variable is missing!")
+    if not token: 
+        print("❌ TELEGRAM_TOKEN Missing!")
         return
 
     Thread(target=run_web_server, daemon=True).start()
-
     app_bot = Application.builder().token(token).post_init(post_init).build()
 
-    # Regex مرن يستجيب لكل الحالات: /settings, settings, Settings, /Settings
     app_bot.add_handler(MessageHandler(filters.Regex(r'(?i)^/?settings$'), handle_settings))
+    app_bot.add_handler(MessageHandler(filters.Regex(r'(?i)^/?scan$'), handle_manual_scan))
     app_bot.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_messages))
     app_bot.add_handler(CallbackQueryHandler(button_callback))
 
-    print("Smart M15 Bot Active & Listening...")
+    print("Pro Scalper Multi-Asset Bot Running...")
     app_bot.run_polling()
 
 if __name__ == "__main__":
