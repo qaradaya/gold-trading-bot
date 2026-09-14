@@ -21,14 +21,13 @@ def run_web_server():
 # ================= ================= =================
 # 1. المتغيرات العامة والإعدادات
 # ================= ================= =================
-active_orders = {}  # حفظ الصفقات المفعلة لكل رمز {symbol: order_data}
+active_orders = {}  
 send_status_reports = True  
 strategy_mode = "flexible"   
 news_filter_active = True
 account_balance_cents = 200000  # رصيد الحساب بالسنت (200,000 سنت = 2,000 دولار)
 risk_percentage = 0.5           # نسبة المخاطرة الافتراضية 0.5%
 
-# أقسام التداول والتصفية
 ASSET_MODES = {
     "gold_only": {
         "label": "🟡 الذهب فقط",
@@ -57,20 +56,27 @@ async def wait_for_next_check():
             break
         await asyncio.sleep(1)
 
+def fetch_url(url, timeout=5):
+    try:
+        res = requests.get(url, timeout=timeout)
+        if res.status_code == 200:
+            return res.json()
+    except Exception as e:
+        print(f"Fetch Error: {e}")
+    return None
+
 # ================= ================= =================
-# 2. فلتر الأخبار وحاسبة اللوت المحدثة
+# 2. فلتر الأخبار وحاسبة اللوت
 # ================= ================= =================
-def is_high_impact_news_near():
-    """فحص الأخبار الاقتصادية عالية التأثير على الدولار (USD)"""
+async def is_high_impact_news_near():
     if not news_filter_active:
         return False, ""
     try:
         url = "https://nfp.ourforecast.com/api/v1/events"
-        response = requests.get(url, timeout=5)
-        if response.status_code == 200:
-            events = response.json()
+        data = await asyncio.to_thread(fetch_url, url, 5)
+        if data and isinstance(data, list):
             now = datetime.utcnow()
-            for event in events:
+            for event in data:
                 if event.get("currency") == "USD" and event.get("impact") == "High":
                     event_time_str = event.get("date", "").replace("Z", "+00:00")
                     if event_time_str:
@@ -82,7 +88,6 @@ def is_high_impact_news_near():
     return False, ""
 
 def calculate_recommended_lot(symbol, entry_price, stop_loss_price):
-    """حساب حجم اللوت التلقائي الصحيح بناءً على نوع الأصل والرصيد بالسنت"""
     try:
         risk_amount_cents = account_balance_cents * (risk_percentage / 100.0)
         price_distance = abs(entry_price - stop_loss_price)
@@ -90,17 +95,11 @@ def calculate_recommended_lot(symbol, entry_price, stop_loss_price):
         if price_distance == 0:
             return 0.10
 
-        # تحديد قيمة حركة السعر بالسنت بناءً على نوع الأصل لحسابات السنت
         if symbol == "XAU/USD":
-            # حركة 1.00 دولار في الذهب تعادل 100 سنت ربح/خسارة لكل 1 لوت سنت
             cost_per_point = 100.0  
         elif "/" in symbol:
-            # الأزواج المباشرة للعملات (EUR/USD, GBP/USD...)
-            # حركة 0.0001 (1 بيب) تعادل 10 سنت لكل 1 لوت سنت
             cost_per_point = 100000.0
         else:
-            # الأسهم (TSLA, NVDA, AAPL...)
-            # حركة 1.00 دولار بالسهم تعادل 100 سنت لكل 1 لوت سنت
             cost_per_point = 100.0
 
         raw_lot = risk_amount_cents / (price_distance * cost_per_point)
@@ -136,28 +135,24 @@ def calculate_ema(data, window):
         ema.append((price * weights[0]) + (ema[-1] * (1 - weights[0])))
     return ema
 
-def get_live_price(symbol):
+async def get_live_price(symbol):
     api_key = os.environ.get("TWELVE_DATA_API_KEY")
     if not api_key:
         return None
-    try:
-        url = f"https://api.twelvedata.com/price?symbol={symbol}&apikey={api_key}"
-        res = requests.get(url, timeout=5).json()
-        if "price" in res:
-            return float(res["price"])
-    except Exception as e:
-        print(f"Live Price Error for {symbol}: {e}")
+    url = f"https://api.twelvedata.com/price?symbol={symbol}&apikey={api_key}"
+    res = await asyncio.to_thread(fetch_url, url, 5)
+    if res and "price" in res:
+        return float(res["price"])
     return None
 
-def analyze_symbol(symbol):
+async def analyze_symbol(symbol):
     global active_orders, strategy_mode
     
     now_utc = datetime.utcnow()
-    # عطلة نهاية الأسبوع في الأسواق المالية
     if now_utc.weekday() in [5, 6]:
         return None, "MARKET_CLOSED", 0, 0, 0, 0
         
-    has_news, news_title = is_high_impact_news_near()
+    has_news, news_title = await is_high_impact_news_near()
     if has_news:
         return None, "NEWS_PAUSE", 0, 0, 0, 0
 
@@ -167,9 +162,9 @@ def analyze_symbol(symbol):
 
     try:
         url_spot = f"https://api.twelvedata.com/time_series?symbol={symbol}&interval=15min&outputsize=40&apikey={api_key}"
-        res_spot = requests.get(url_spot, timeout=8).json()
+        res_spot = await asyncio.to_thread(fetch_url, url_spot, 8)
         
-        if "values" not in res_spot:
+        if not res_spot or "values" not in res_spot:
             return None, "API_ERROR", 0, 0, 0, 0
             
         spot_values = res_spot["values"]
@@ -184,8 +179,8 @@ def analyze_symbol(symbol):
 
         if symbol == "XAU/USD":
             url_futures = f"https://api.twelvedata.com/time_series?symbol=MGC&interval=15min&outputsize=40&apikey={api_key}"
-            res_futures = requests.get(url_futures, timeout=8).json()
-            if "values" in res_futures:
+            res_futures = await asyncio.to_thread(fetch_url, url_futures, 8)
+            if res_futures and "values" in res_futures:
                 futures_values = res_futures["values"]
                 futures_values.reverse()
                 futures_closes = [float(item["close"]) for item in futures_values]
@@ -226,7 +221,6 @@ def analyze_symbol(symbol):
         price_step = 0.50 if symbol == "XAU/USD" else (spot_price * 0.0015)
         max_risk = 10.00 if symbol == "XAU/USD" else (spot_price * 0.02)
 
-        # شراء معلق Buy Stop
         if ema20 > ema50 and (rsi_buy_min <= rsi < rsi_buy_max) and (basis_expansion >= basis_threshold or volume_surging or symbol != "XAU/USD"):
             proposed_entry = round(min(max(tight_swing_high, spot_price) + price_step, spot_price + (price_step * 5)), precision)
             sl_price = round(tight_swing_low - price_step, precision)
@@ -249,7 +243,6 @@ def analyze_symbol(symbol):
                     active_orders[symbol] = new_order
                     return new_order, "NEW_ORDER", spot_price, basis_current, rsi, rec_lot
 
-        # بيع معلق Sell Stop
         elif ema20 < ema50 and (rsi_sell_min < rsi <= rsi_sell_max) and (basis_expansion <= -basis_threshold or volume_surging or symbol != "XAU/USD"):
             proposed_entry = round(max(min(tight_swing_low, spot_price) - price_step, spot_price - (price_step * 5)), precision)
             sl_price = round(tight_swing_high + price_step, precision)
@@ -284,56 +277,57 @@ async def fast_price_monitor_loop(bot: Bot, chat_id: str):
     global active_orders
     while True:
         try:
-            symbols_to_remove = []
-            for sym, order in list(active_orders.items()):
-                live_p = get_live_price(sym)
-                if live_p is not None:
-                    status = order["status"]
-                    if status == "PENDING":
-                        if order['type'] == 'Buy Stop' and live_p <= order['sl']:
-                            symbols_to_remove.append(sym)
-                            msg = f"🚫 **تنبيه فوري [{sym}]: تم إلغاء صفقة الشراء المعلقة!**\nالسعر ضرب مستوى الستوب (`{live_p}`) قبل التفعيل."
-                            await bot.send_message(chat_id=chat_id, text=msg, parse_mode="Markdown")
-                        elif order['type'] == 'Sell Stop' and live_p >= order['sl']:
-                            symbols_to_remove.append(sym)
-                            msg = f"🚫 **تنبيه فوري [{sym}]: تم إلغاء صفقة البيع المعلقة!**\nالسعر ضرب مستوى الستوب (`{live_p}`) قبل التفعيل."
-                            await bot.send_message(chat_id=chat_id, text=msg, parse_mode="Markdown")
-                        elif order['type'] == 'Buy Stop' and live_p >= order['entry']:
-                            active_orders[sym]["status"] = "TRIGGERED"
-                            msg = f"⚡️ **تم تفعيل صفقة الشراء [{sym}] فوراً!**\n📍 **سعر التفعيل الحقيقي:** `{live_p}`"
-                            await bot.send_message(chat_id=chat_id, text=msg, parse_mode="Markdown")
-                        elif order['type'] == 'Sell Stop' and live_p <= order['entry']:
-                            active_orders[sym]["status"] = "TRIGGERED"
-                            msg = f"⚡️ **تم تفعيل صفقة البيع [{sym}] فوراً!**\n📍 **سعر التفعيل الحقيقي:** `{live_p}`"
-                            await bot.send_message(chat_id=chat_id, text=msg, parse_mode="Markdown")
+            if active_orders:
+                symbols_to_remove = []
+                for sym, order in list(active_orders.items()):
+                    live_p = await get_live_price(sym)
+                    if live_p is not None:
+                        status = order["status"]
+                        if status == "PENDING":
+                            if order['type'] == 'Buy Stop' and live_p <= order['sl']:
+                                symbols_to_remove.append(sym)
+                                msg = f"🚫 **تنبيه فوري [{sym}]: تم إلغاء صفقة الشراء المعلقة!**\nالسعر ضرب مستوى الستوب (`{live_p}`) قبل التفعيل."
+                                await bot.send_message(chat_id=chat_id, text=msg, parse_mode="Markdown")
+                            elif order['type'] == 'Sell Stop' and live_p >= order['sl']:
+                                symbols_to_remove.append(sym)
+                                msg = f"🚫 **تنبيه فوري [{sym}]: تم إلغاء صفقة البيع المعلقة!**\nالسعر ضرب مستوى الستوب (`{live_p}`) قبل التفعيل."
+                                await bot.send_message(chat_id=chat_id, text=msg, parse_mode="Markdown")
+                            elif order['type'] == 'Buy Stop' and live_p >= order['entry']:
+                                active_orders[sym]["status"] = "TRIGGERED"
+                                msg = f"⚡️ **تم تفعيل صفقة الشراء [{sym}] فوراً!**\n📍 **سعر التفعيل الحقيقي:** `{live_p}`"
+                                await bot.send_message(chat_id=chat_id, text=msg, parse_mode="Markdown")
+                            elif order['type'] == 'Sell Stop' and live_p <= order['entry']:
+                                active_orders[sym]["status"] = "TRIGGERED"
+                                msg = f"⚡️ **تم تفعيل صفقة البيع [{sym}] فوراً!**\n📍 **سعر التفعيل الحقيقي:** `{live_p}`"
+                                await bot.send_message(chat_id=chat_id, text=msg, parse_mode="Markdown")
 
-                    elif status == "TRIGGERED":
-                        if order['type'] == 'Buy Stop':
-                            if live_p >= order['tp']:
-                                symbols_to_remove.append(sym)
-                                msg = f"🎯 **تم تحقيق الهدف [{sym}] بنجاح!**\nسعر الإغلاق: `{live_p}`"
-                                await bot.send_message(chat_id=chat_id, text=msg, parse_mode="Markdown")
-                            elif live_p <= order['sl']:
-                                symbols_to_remove.append(sym)
-                                msg = f"🔴 **تم ضرب وقوف الخسارة [{sym}].**\nسعر الإغلاق: `{live_p}`"
-                                await bot.send_message(chat_id=chat_id, text=msg, parse_mode="Markdown")
-                        elif order['type'] == 'Sell Stop':
-                            if live_p <= order['tp']:
-                                symbols_to_remove.append(sym)
-                                msg = f"🎯 **تم تحقيق الهدف [{sym}] بنجاح!**\nسعر الإغلاق: `{live_p}`"
-                                await bot.send_message(chat_id=chat_id, text=msg, parse_mode="Markdown")
-                            elif live_p >= order['sl']:
-                                symbols_to_remove.append(sym)
-                                msg = f"🔴 **تم ضرب وقوف الخسارة [{sym}].**\nسعر الإغلاق: `{live_p}`"
-                                await bot.send_message(chat_id=chat_id, text=msg, parse_mode="Markdown")
-            
-            for sym in symbols_to_remove:
-                if sym in active_orders:
-                    del active_orders[sym]
+                        elif status == "TRIGGERED":
+                            if order['type'] == 'Buy Stop':
+                                if live_p >= order['tp']:
+                                    symbols_to_remove.append(sym)
+                                    msg = f"🎯 **تم تحقيق الهدف [{sym}] بنجاح!**\nسعر الإغلاق: `{live_p}`"
+                                    await bot.send_message(chat_id=chat_id, text=msg, parse_mode="Markdown")
+                                elif live_p <= order['sl']:
+                                    symbols_to_remove.append(sym)
+                                    msg = f"🔴 **تم ضرب وقوف الخسارة [{sym}].**\nسعر الإغلاق: `{live_p}`"
+                                    await bot.send_message(chat_id=chat_id, text=msg, parse_mode="Markdown")
+                            elif order['type'] == 'Sell Stop':
+                                if live_p <= order['tp']:
+                                    symbols_to_remove.append(sym)
+                                    msg = f"🎯 **تم تحقيق الهدف [{sym}] بنجاح!**\nسعر الإغلاق: `{live_p}`"
+                                    await bot.send_message(chat_id=chat_id, text=msg, parse_mode="Markdown")
+                                elif live_p >= order['sl']:
+                                    symbols_to_remove.append(sym)
+                                    msg = f"🔴 **تم ضرب وقوف الخسارة [{sym}].**\nسعر الإغلاق: `{live_p}`"
+                                    await bot.send_message(chat_id=chat_id, text=msg, parse_mode="Markdown")
+                
+                for sym in symbols_to_remove:
+                    if sym in active_orders:
+                        del active_orders[sym]
 
         except Exception as e:
             print(f"Fast Monitor Exception: {e}")
-        await asyncio.sleep(8)
+        await asyncio.sleep(25)
 
 async def market_scanner_loop(bot: Bot, chat_id: str):
     global send_status_reports, selected_mode
@@ -343,9 +337,13 @@ async def market_scanner_loop(bot: Bot, chat_id: str):
             current_symbols = ASSET_MODES[selected_mode]["symbols"]
             
             for sym in current_symbols:
-                order, event, spot_price, basis, rsi, recommended_lot = analyze_symbol(sym)
+                order, event, spot_price, basis, rsi, recommended_lot = await analyze_symbol(sym)
                 
-                if send_status_reports and (event in ["NO_SIGNAL", "MARKET_CLOSED", "STILL_PENDING", "STILL_TRIGGERED", "NEWS_PAUSE"]):
+                if event in ["API_ERROR", "ERROR"]:
+                    if send_status_reports:
+                        msg = f"⚠️ **تنبيه البوت [{sym}]:** تعذر جلب البيانات من المزود (غالباً بسبب تجاوز حد طلبات API اليومي)."
+                        await bot.send_message(chat_id=chat_id, text=msg, parse_mode="Markdown")
+                elif send_status_reports and (event in ["NO_SIGNAL", "MARKET_CLOSED", "STILL_PENDING", "STILL_TRIGGERED", "NEWS_PAUSE"]):
                     market_text = " (عطلة/مغلق)" if event == "MARKET_CLOSED" else ""
                     basis_info = f" | **الآجل/الفوري:** `{basis}`" if sym == "XAU/USD" else ""
                     status_msg = (
@@ -429,7 +427,6 @@ async def handle_settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def handle_text_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """استقبال القيمة اليدوية للرصيد"""
     global account_balance_cents
     text = update.message.text.strip()
     
