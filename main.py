@@ -23,22 +23,20 @@ def run_web_server():
 # 1. المتغيرات العامة والإعدادات
 # ================= ================= =================
 active_orders = {}  
-send_status_reports = True    # التحكم بنبض الحياة فقط
-strategy_mode = "flexible"   
+send_status_reports = True    # التحكم برسالة نبض الحياة فقط
+strategy_strictness = "flexible" # مرن أو مشدد
+active_strategy = "both"      # "scalping", "intraday", "both"
 news_filter_active = True
 account_balance_cents = 200000  
 risk_percentage = 0.5           
 current_key_idx = 0
-last_scanned_candle = ""     # لمنع تكرار مسح نفس الشمعة
+last_scanned_candle = ""     
 
-def get_all_api_keys():
-    """جلب جميع مفاتيح API من متغيرات البيئة"""
-    keys = []
-    for k, v in os.environ.items():
-        if k.startswith("TWELVE_DATA_API_KEY") and v.strip():
-            if v.strip() not in keys:
-                keys.append(v.strip())
-    return keys
+STRATEGY_TYPES = {
+    "scalping": {"label": "⚡️ السكالبينج الخاطف (1:1.5)"},
+    "intraday": {"label": "📈 الاتجاه اليومي (1:2)"},
+    "both":     {"label": "🚀 الاستراتيجيتين معاً"}
+}
 
 ASSET_MODES = {
     "gold_only": {
@@ -60,6 +58,15 @@ ASSET_MODES = {
 }
 
 selected_mode = "gold_only"
+
+def get_all_api_keys():
+    """جلب جميع مفاتيح API من متغيرات البيئة تلقائياً"""
+    keys = []
+    for k, v in os.environ.items():
+        if k.startswith("TWELVE_DATA_API_KEY") and v.strip():
+            if v.strip() not in keys:
+                keys.append(v.strip())
+    return keys
 
 # ================= ================= =================
 # 2. محرك طلبات الـ API مع التبديل التلقائي
@@ -138,7 +145,7 @@ def calculate_recommended_lot(symbol, entry_price, stop_loss_price):
         return 0.10
 
 # ================= ================= =================
-# 4. التحليل الفني
+# 4. التحليل الفني ومحرك الاستراتيجيات
 # ================= ================= =================
 def calculate_rsi(closes, window=14):
     if len(closes) < window + 1:
@@ -173,7 +180,7 @@ async def get_live_price(symbol):
     return None
 
 async def analyze_symbol(symbol):
-    global active_orders, strategy_mode
+    global active_orders, strategy_strictness, active_strategy
     
     if datetime.utcnow().weekday() in [5, 6]:
         return None, "الماركت مغلق", 0, 0, 0
@@ -198,41 +205,91 @@ async def analyze_symbol(symbol):
     ema20 = calculate_ema(spot_closes, 20)[-1]
     ema50 = calculate_ema(spot_closes, 50)[-1]
     rsi = calculate_rsi(spot_closes, 14)
-    tight_swing_high = max(spot_highs[-3:-1])
-    tight_swing_low = min(spot_lows[-3:-1])
 
     if symbol in active_orders:
         return active_orders[symbol], "صفقة قائمة", spot_price, rsi, 0
 
-    rsi_buy_max = 75 if strategy_mode == "flexible" else 68
+    rsi_buy_max = 75 if strategy_strictness == "flexible" else 68
     rsi_buy_min = 30  
-    rsi_sell_min = 25 if strategy_mode == "flexible" else 32
+    rsi_sell_min = 25 if strategy_strictness == "flexible" else 32
     rsi_sell_max = 70 
 
     price_step = 0.50 if symbol == "XAU/USD" else (spot_price * 0.0015)
-    max_risk = 10.00 if symbol == "XAU/USD" else (spot_price * 0.02)
+    
+    # --- 1. فحص استراتيجية الاتجاه اليومي (Intraday Trend 1:2) ---
+    if active_strategy in ["intraday", "both"]:
+        # استخدام نطاق 8 شموع سابقة + هامش أمان عريض لحماية الستوب من الذيول
+        wide_swing_high = max(spot_highs[-9:-1])
+        wide_swing_low = min(spot_lows[-9:-1])
+        wide_buffer = 2.50 if symbol == "XAU/USD" else (spot_price * 0.0035) # $2.50 هامش أمان للذهب
 
-    if ema20 > ema50 and (rsi_buy_min <= rsi < rsi_buy_max):
-        proposed_entry = round(min(max(tight_swing_high, spot_price) + price_step, spot_price + (price_step * 5)), precision)
-        sl_price = round(tight_swing_low - price_step, precision)
-        if proposed_entry > spot_price > sl_price:
+        if ema20 > ema50 and (rsi_buy_min <= rsi < rsi_buy_max):
+            proposed_entry = round(max(wide_swing_high, spot_price) + price_step, precision)
+            sl_price = round(wide_swing_low - wide_buffer, precision)
             risk_distance = proposed_entry - sl_price
-            if risk_distance <= max_risk:
-                tp_price = round(proposed_entry + (risk_distance * 1.5), precision)
+            
+            if proposed_entry > spot_price > sl_price and risk_distance > 0:
+                tp_price = round(proposed_entry + (risk_distance * 2.0), precision) # RRR 1:2
                 rec_lot = calculate_recommended_lot(symbol, proposed_entry, sl_price)
-                new_order = {"symbol": symbol, "type": "Buy Stop", "entry": proposed_entry, "tp": tp_price, "sl": sl_price, "rsi": rsi, "lot": rec_lot, "status": "PENDING"}
+                new_order = {
+                    "symbol": symbol, "strategy_name": "📈 اتجاه يومي (1:2)",
+                    "type": "Buy Stop", "entry": proposed_entry, "tp": tp_price, "sl": sl_price, 
+                    "rsi": rsi, "lot": rec_lot, "status": "PENDING"
+                }
                 active_orders[symbol] = new_order
                 return new_order, "NEW_ORDER", spot_price, rsi, rec_lot
 
-    elif ema20 < ema50 and (rsi_sell_min < rsi <= rsi_sell_max):
-        proposed_entry = round(max(min(tight_swing_low, spot_price) - price_step, spot_price - (price_step * 5)), precision)
-        sl_price = round(tight_swing_high + price_step, precision)
-        if proposed_entry < spot_price < sl_price:
+        elif ema20 < ema50 and (rsi_sell_min < rsi <= rsi_sell_max):
+            proposed_entry = round(min(wide_swing_low, spot_price) - price_step, precision)
+            sl_price = round(wide_swing_high + wide_buffer, precision)
             risk_distance = sl_price - proposed_entry
-            if risk_distance <= max_risk:
-                tp_price = round(proposed_entry - (risk_distance * 1.5), precision)
+            
+            if proposed_entry < spot_price < sl_price and risk_distance > 0:
+                tp_price = round(proposed_entry - (risk_distance * 2.0), precision) # RRR 1:2
                 rec_lot = calculate_recommended_lot(symbol, proposed_entry, sl_price)
-                new_order = {"symbol": symbol, "type": "Sell Stop", "entry": proposed_entry, "tp": tp_price, "sl": sl_price, "rsi": rsi, "lot": rec_lot, "status": "PENDING"}
+                new_order = {
+                    "symbol": symbol, "strategy_name": "📈 اتجاه يومي (1:2)",
+                    "type": "Sell Stop", "entry": proposed_entry, "tp": tp_price, "sl": sl_price, 
+                    "rsi": rsi, "lot": rec_lot, "status": "PENDING"
+                }
+                active_orders[symbol] = new_order
+                return new_order, "NEW_ORDER", spot_price, rsi, rec_lot
+
+    # --- 2. فحص استراتيجية السكالبينج الخاطف (Scalping 1:1.5) ---
+    if active_strategy in ["scalping", "both"]:
+        tight_swing_high = max(spot_highs[-3:-1])
+        tight_swing_low = min(spot_lows[-3:-1])
+        max_risk = 10.00 if symbol == "XAU/USD" else (spot_price * 0.02)
+
+        if ema20 > ema50 and (rsi_buy_min <= rsi < rsi_buy_max):
+            proposed_entry = round(min(max(tight_swing_high, spot_price) + price_step, spot_price + (price_step * 5)), precision)
+            sl_price = round(tight_swing_low - price_step, precision)
+            risk_distance = proposed_entry - sl_price
+
+            if proposed_entry > spot_price > sl_price and risk_distance <= max_risk:
+                tp_price = round(proposed_entry + (risk_distance * 1.5), precision) # RRR 1:1.5
+                rec_lot = calculate_recommended_lot(symbol, proposed_entry, sl_price)
+                new_order = {
+                    "symbol": symbol, "strategy_name": "⚡️ سكالبينج خاطف (1:1.5)",
+                    "type": "Buy Stop", "entry": proposed_entry, "tp": tp_price, "sl": sl_price, 
+                    "rsi": rsi, "lot": rec_lot, "status": "PENDING"
+                }
+                active_orders[symbol] = new_order
+                return new_order, "NEW_ORDER", spot_price, rsi, rec_lot
+
+        elif ema20 < ema50 and (rsi_sell_min < rsi <= rsi_sell_max):
+            proposed_entry = round(max(min(tight_swing_low, spot_price) - price_step, spot_price - (price_step * 5)), precision)
+            sl_price = round(tight_swing_high + price_step, precision)
+            risk_distance = sl_price - proposed_entry
+
+            if proposed_entry < spot_price < sl_price and risk_distance <= max_risk:
+                tp_price = round(proposed_entry - (risk_distance * 1.5), precision) # RRR 1:1.5
+                rec_lot = calculate_recommended_lot(symbol, proposed_entry, sl_price)
+                new_order = {
+                    "symbol": symbol, "strategy_name": "⚡️ سكالبينج خاطف (1:1.5)",
+                    "type": "Sell Stop", "entry": proposed_entry, "tp": tp_price, "sl": sl_price, 
+                    "rsi": rsi, "lot": rec_lot, "status": "PENDING"
+                }
                 active_orders[symbol] = new_order
                 return new_order, "NEW_ORDER", spot_price, rsi, rec_lot
 
@@ -249,7 +306,6 @@ async def market_scanner_loop(bot: Bot, chat_id: str):
     while True:
         try:
             now = datetime.utcnow()
-            # الفحص عند الدقائق :00, :15, :30, :45
             if now.minute % 15 == 0:
                 candle_id = now.strftime("%Y-%m-%d %H:%M")
                 
@@ -272,23 +328,24 @@ async def market_scanner_loop(bot: Bot, chat_id: str):
                             print(f"Error scanning {sym}: {sym_err}")
                             scan_results.append((sym, 0, 0, "خطأ بالاتصال"))
                         
-                        await asyncio.sleep(1) # فاصل زمني بين الطلبات
+                        await asyncio.sleep(1) 
 
-                    # 1. إرسال تنبيهات الإشارات الفورية إن وجدت
+                    # 1. إرسال تنبيهات الإشارات الفورية
                     for sym, order, spot_price, rsi in signals_found:
                         emoji = "🟢" if order['type'] == "Buy Stop" else "🔴"
                         msg = (
-                            f"⚡️ **إشارة جديدة (شمعة M15 مكتملة)**\n"
+                            f"⚡️ **إشارة جديدة [{order.get('strategy_name')}]**\n"
                             f"⏱ **التوقيت:** {now.strftime('%H:%M')} UTC | **{sym}**\n\n"
-                            f"📊 **السعر:** `{spot_price}` | **RSI:** `{rsi}`\n"
+                            f"📊 **السعر الحالي:** `{spot_price}` | **RSI:** `{rsi}`\n"
                             f"{emoji} **النوع:** {order['type']}\n"
-                            f"🎯 **الدخول:** `{order['entry']}`\n"
-                            f"🟢 **الهدف:** `{order['tp']}` | 🔴 **الستوب:** `{order['sl']}`\n\n"
-                            f"💰 **اللوت المقترح:** `{order['lot']}` | المخاطرة: {risk_percentage}%"
+                            f"🎯 **أمر الدخول:** `{order['entry']}`\n"
+                            f"🟢 **الهدف (TP):** `{order['tp']}`\n"
+                            f"🔴 **الستوب (SL):** `{order['sl']}`\n\n"
+                            f"💰 **اللوت المقترح:** `{order['lot']}` | المخاطرة المحسوبة: {risk_percentage}%"
                         )
                         await bot.send_message(chat_id=chat_id, text=msg, parse_mode="Markdown")
 
-                    # 2. إرسال تقرير المسح الدوري الدائم (حتى لو لم توجد إشارة)
+                    # 2. إرسال تقرير المسح الدوري الدائم
                     summary_lines = []
                     for sym, price, rsi, status in scan_results:
                         summary_lines.append(f"▫️ **{sym}:** السعر `{price}` | RSI `{rsi}` ({status})")
@@ -296,16 +353,17 @@ async def market_scanner_loop(bot: Bot, chat_id: str):
                     summary_msg = (
                         f"📊 **تقرير مسح شمعة M15 مكتملة**\n"
                         f"⏱ **التوقيت:** `{now.strftime('%H:%M')} UTC`\n"
-                        f"🌐 **النطاق:** {ASSET_MODES[selected_mode]['label']}\n\n"
+                        f"🌐 **النطاق:** {ASSET_MODES[selected_mode]['label']}\n"
+                        f"🎯 **الاستراتيجية المفعلة:** {STRATEGY_TYPES[active_strategy]['label']}\n\n"
                         + "\n".join(summary_lines) + "\n\n"
-                        f"✅ **الحالة:** تم طلب الأسعار وتحليل الشمعة بنجاح."
+                        f"✅ **الحالة:** تم تحليل الشموع بنجاح."
                     )
                     await bot.send_message(chat_id=chat_id, text=summary_msg, parse_mode="Markdown")
 
         except Exception as e:
             print(f"Scanner Loop Exception: {e}")
             
-        await asyncio.sleep(5) # التحقق كل 5 ثوانٍ لضمان عدم تفويت الدقيقة
+        await asyncio.sleep(5) 
 
 async def order_monitor_loop(bot: Bot, chat_id: str):
     """مراقبة أهداف واستوبات الصفقات المفتوحة"""
@@ -346,7 +404,7 @@ async def order_monitor_loop(bot: Bot, chat_id: str):
             await asyncio.sleep(30)
 
 async def heartbeat_loop(bot: Bot, chat_id: str):
-    """نبض الحياة الدوري (يعمل فقط إذا كانت الخاصية مفعّلة في الإعدادات)"""
+    """نبض الحياة الدوري"""
     last_sent_minute = -1
     while True:
         try:
@@ -365,17 +423,40 @@ async def heartbeat_loop(bot: Bot, chat_id: str):
             await asyncio.sleep(30)
 
 # ================= ================= =================
-# 6. لوحة التحكم وأوامر التليجرام
+# 6. لوحة التحكم والتقرير الشامل (إعادة التقرير النصي الكامل)
 # ================= ================= =================
+def build_settings_text():
+    """بناء التقرير النصي التفصيلي للإعدادات"""
+    return (
+        f"⚙️ **تقرير وإعدادات البوت الحالية:**\n\n"
+        f"🌐 **نطاق الأصول:** {ASSET_MODES[selected_mode]['label']}\n"
+        f"🎯 **نمط الاستراتيجية:** {STRATEGY_TYPES[active_strategy]['label']}\n"
+        f"🎛 **نمط المؤشرات:** {'مرن (Flexible)' if strategy_strictness == 'flexible' else 'مشدد (Strict)'}\n"
+        f"🟢 **فلتر الأخبار:** {'مفعل ✅' if news_filter_active else 'معطل ❌'}\n"
+        f"🎯 **نسبة المخاطرة:** `{risk_percentage}%` لكل صفقة\n"
+        f"💰 **رصيد الحساب:** `{account_balance_cents}` سنت (ما يعادل {account_balance_cents/100:.2f}$)\n"
+        f"📡 **رسائل نبض الحياة:** {'مفعلة 🟢' if send_status_reports else 'معطلة 🔴'}\n"
+        f"🔑 **مفاتيح API المستكشفة:** `{len(get_all_api_keys())}`"
+    )
+
 def build_settings_keyboard():
-    current_label = ASSET_MODES[selected_mode]["label"]
     keyboard = [
-        [InlineKeyboardButton(f"🌐 النطاق: {current_label}", callback_data="menu_asset_modes")],
+        [InlineKeyboardButton(f"🌐 النطاق: {ASSET_MODES[selected_mode]['label']}", callback_data="menu_asset_modes")],
+        [InlineKeyboardButton(f"🎯 الاستراتيجية: {STRATEGY_TYPES[active_strategy]['label']}", callback_data="menu_strategies")],
+        [InlineKeyboardButton(f"🎛 النمط: {'مرن' if strategy_strictness == 'flexible' else 'مشدد'}", callback_data="toggle_mode")],
         [InlineKeyboardButton("🔴 إيقاف نبض الحياة" if send_status_reports else "🟢 تشغيل نبض الحياة", callback_data="toggle_report")],
-        [InlineKeyboardButton(f"🎯 النمط: {'مرن' if strategy_mode == 'flexible' else 'مشدد'}", callback_data="toggle_mode")],
         [InlineKeyboardButton(f"🟢 فلتر الأخبار: مفعل" if news_filter_active else "🔴 فلتر الأخبار: معطل", callback_data="toggle_news")],
         [InlineKeyboardButton(f"🎯 نسبة المخاطرة: {risk_percentage}%", callback_data="toggle_risk")],
         [InlineKeyboardButton(f"💰 الرصيد: {account_balance_cents} سنت", callback_data="prompt_balance")]
+    ]
+    return InlineKeyboardMarkup(keyboard)
+
+def build_strategies_keyboard():
+    keyboard = [
+        [InlineKeyboardButton("⚡️ السكالبينج الخاطف (1:1.5)", callback_data="set_strat_scalping")],
+        [InlineKeyboardButton("📈 الاتجاه اليومي (1:2)", callback_data="set_strat_intraday")],
+        [InlineKeyboardButton("🚀 الاستراتيجيتين معاً", callback_data="set_strat_both")],
+        [InlineKeyboardButton("🔙 العودة للإعدادات", callback_data="back_to_settings")]
     ]
     return InlineKeyboardMarkup(keyboard)
 
@@ -403,7 +484,8 @@ async def handle_manual_scan(update: Update, context: ContextTypes.DEFAULT_TYPE)
     await update.message.reply_text(report, parse_mode="Markdown")
 
 async def handle_settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("⚙️ **لوحة تحكم إعدادات البوت**", reply_markup=build_settings_keyboard(), parse_mode="Markdown")
+    """عرض التقرير الشامل النصي ومعه لوحة الأزرار التفاعلية"""
+    await update.message.reply_text(build_settings_text(), reply_markup=build_settings_keyboard(), parse_mode="Markdown")
 
 async def handle_text_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global account_balance_cents
@@ -418,28 +500,33 @@ async def handle_text_messages(update: Update, context: ContextTypes.DEFAULT_TYP
             await update.message.reply_text("❌ صيغة خاطئة! أرسل: `balance 200000`", parse_mode="Markdown")
 
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global send_status_reports, strategy_mode, news_filter_active, risk_percentage, selected_mode
+    global send_status_reports, strategy_strictness, active_strategy, news_filter_active, risk_percentage, selected_mode
     query = update.callback_query
     await query.answer()
 
     if query.data == "toggle_report": 
         send_status_reports = not send_status_reports
     elif query.data == "toggle_mode": 
-        strategy_mode = "strict" if strategy_mode == "flexible" else "flexible"
+        strategy_strictness = "strict" if strategy_strictness == "flexible" else "flexible"
     elif query.data == "toggle_news": 
         news_filter_active = not news_filter_active
     elif query.data == "toggle_risk": 
         risk_percentage = 1.0 if risk_percentage == 0.5 else 0.5
     elif query.data == "menu_asset_modes":
-        await query.edit_message_text("📊 **اختر نطاق الأصول:**", reply_markup=build_asset_modes_keyboard(), parse_mode="Markdown")
+        await query.edit_message_text("📊 **اختر نطاق الأصول المقتنصة:**", reply_markup=build_asset_modes_keyboard(), parse_mode="Markdown")
+        return
+    elif query.data == "menu_strategies":
+        await query.edit_message_text("🎯 **اختر استراتيجية التداول المفضلة:**", reply_markup=build_strategies_keyboard(), parse_mode="Markdown")
         return
     elif query.data.startswith("set_mode_"):
         selected_mode = query.data.replace("set_mode_", "")
+    elif query.data.startswith("set_strat_"):
+        active_strategy = query.data.replace("set_strat_", "")
     elif query.data == "back_to_settings":
         pass
 
     try:
-        await query.edit_message_text("⚙️ **تم تحديث الإعدادات**", reply_markup=build_settings_keyboard(), parse_mode="Markdown")
+        await query.edit_message_text(build_settings_text(), reply_markup=build_settings_keyboard(), parse_mode="Markdown")
     except Exception:
         pass
 
@@ -467,7 +554,7 @@ def main():
     app_bot.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_messages))
     app_bot.add_handler(CallbackQueryHandler(button_callback))
 
-    print("Pro Scalper Multi-Asset Bot Running...")
+    print("Pro Scalper Multi-Strategy Bot Running...")
     app_bot.run_polling()
 
 if __name__ == "__main__":
