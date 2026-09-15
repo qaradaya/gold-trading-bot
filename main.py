@@ -323,7 +323,6 @@ async def market_scanner_loop(bot: Bot, chat_id: str):
                     
                     orders, status, spot_price, rsi = await analyze_gold_market()
                     
-                    # إرسال إشارة الصفقة فور توفرها (الأولوية العظمى)
                     for order in orders:
                         emoji = "🔴" if "بيع" in order['type_ar'] else "🟢"
                         msg = (
@@ -356,7 +355,6 @@ async def heartbeat_loop(bot: Bot, chat_id: str):
         except Exception:
             await asyncio.sleep(30)
 
-# معالجة أمر Settings والإعدادات
 async def handle_settings_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(build_settings_text(), reply_markup=build_settings_keyboard(), parse_mode="Markdown")
 
@@ -411,8 +409,8 @@ def main():
     Thread(target=run_web_server, daemon=True).start()
     app_bot = Application.builder().token(token).post_init(post_init).build()
     
-    # معالجات الأوامر
-    app_bot.add_handler(CommandHandler(["settings", "الاعدادات", "إعدادات"], handle_settings_command))
+    # معالجات الأوامر الصحيحة والمطابقة لشروط تلغرام
+    app_bot.add_handler(CommandHandler("settings", handle_settings_command))
     app_bot.add_handler(MessageHandler(filters.Regex(r'(?i)^/?(settings|الاعدادات|إعدادات)$'), handle_settings_command))
     
     app_bot.add_handler(MessageHandler(filters.Regex(r'(?i)^/?scan$'), handle_manual_scan))
