@@ -270,10 +270,11 @@ async def analyze_symbol(symbol):
 
     # --- 1. فحص استراتيجية الاتجاه اليومي (Intraday Trend 1:2) ---
     if active_strategy in ["intraday", "both"]:
-        wide_swing_high = max(spot_highs[-9:-1])
-        wide_swing_low = min(spot_lows[-9:-1])
+        # نطاق واسع لحساب القمم والقيعان الهيكلية (25 شمعة = 6.25 ساعة على M15)
+        wide_swing_high = max(spot_highs[-25:-1])
+        wide_swing_low = min(spot_lows[-25:-1])
         
-        # هامش ستوب تكيفي (ATR Buffer)
+        # هامش ستوب تكيفي بناءً على ATR
         sl_buffer = round(current_atr * 1.2, precision)
         tp_buffer = round(current_atr * 0.5, precision)
 
@@ -300,7 +301,8 @@ async def analyze_symbol(symbol):
 
         elif ema20 < ema50 and (rsi_sell_min < rsi <= rsi_sell_max):
             proposed_entry = round(min(wide_swing_low, spot_price) - price_step, precision)
-            sl_price = round(wide_swing_high + sl_buffer, precision)
+            # التأكد من وضع الستوب أعلى القمة الهيكلية الشاملة والسعر الحالي
+            sl_price = round(max(wide_swing_high, spot_price) + sl_buffer, precision)
             risk_distance = sl_price - proposed_entry
             
             if proposed_entry < spot_price < sl_price and risk_distance > 0:
@@ -321,8 +323,9 @@ async def analyze_symbol(symbol):
 
     # --- 2. فحص استراتيجية السكالبينج الخاطف (Scalping 1:1.5) ---
     if active_strategy in ["scalping", "both"]:
-        tight_swing_high = max(spot_highs[-3:-1])
-        tight_swing_low = min(spot_lows[-3:-1])
+        # نطاق 8 شموع للسكالبينج (ساعتان كاملتان)
+        tight_swing_high = max(spot_highs[-8:-1])
+        tight_swing_low = min(spot_lows[-8:-1])
         
         sl_buffer_scalp = round(current_atr * 0.5, precision)
         tp_buffer_scalp = round(current_atr * 0.3, precision)
@@ -351,7 +354,7 @@ async def analyze_symbol(symbol):
 
         elif ema20 < ema50 and (rsi_sell_min < rsi <= rsi_sell_max):
             proposed_entry = round(max(min(tight_swing_low, spot_price) - price_step, spot_price - (price_step * 5)), precision)
-            sl_price = round(tight_swing_high + sl_buffer_scalp, precision)
+            sl_price = round(max(tight_swing_high, spot_price) + sl_buffer_scalp, precision)
             risk_distance = sl_price - proposed_entry
 
             if proposed_entry < spot_price < sl_price and risk_distance <= max_risk:
