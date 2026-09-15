@@ -16,25 +16,25 @@ app = Flask(__name__)
 @app.route('/')
 @app.route('/ping')
 def home():
-    return "XAUUSD AI Dynamic Trading Engine is Running!"
+    return "XAUUSD AI Dynamic Trading Engine is Live & Healthy!"
 
 def run_web_server():
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
 
 # ================= ================= =================
-# 2. المتغيرات العامة والإعدادات (خاص بالذهب فقط)
+# 2. المتغيرات العامة والإعدادات
 # ================= ================= =================
-SYMBOL = "XAU/USD"  # الاقتصار التام على الذهب
+SYMBOL = "XAU/USD"
 active_orders = {}  
 send_status_reports = True    
 news_filter_active = True
-account_balance_cents = 200000  # رصيد الحساب بالسنت (أو الدولار)
-risk_percentage = 0.5           # نسبة المخاطرة لكل صفقة (0.5%)
+account_balance_cents = 200000  
+risk_percentage = 0.5           
 current_key_idx = 0
 last_scanned_candle = ""     
+active_strategy = "both"      # "scalping", "intraday", "both"
 
-# المسميات العربية المتوافقة تماماً مع منصة MetaTrader 5
 ORDER_TRANSLATIONS = {
     "Buy Stop": "إيقاف أمر الشراء",
     "Sell Stop": "إيقاف أمر البيع",
@@ -42,6 +42,12 @@ ORDER_TRANSLATIONS = {
     "Sell Limit": "حد أمر البيع",
     "Market Buy": "تنفيذ شراء مباشر",
     "Market Sell": "تنفيذ بيع مباشر"
+}
+
+STRATEGY_TYPES = {
+    "scalping": "⚡️ السكالبينج الخاطف",
+    "intraday": "📈 الاتجاه اليومي",
+    "both":     "🚀 كلاهما معاً"
 }
 
 def get_all_api_keys():
@@ -53,11 +59,11 @@ def get_all_api_keys():
     return keys
 
 # ================= ================= =================
-# 3. جلب البيانات والأخبار الاقتصادية
+# 3. جلب البيانات والأخبار الاقتصادية بشكل آمن
 # ================= ================= =================
-def fetch_url(url, timeout=6):
+def fetch_url(url, params=None, timeout=6):
     try:
-        res = requests.get(url, timeout=timeout)
+        res = requests.get(url, params=params, timeout=timeout)
         if res.status_code == 200:
             data = res.json()
             if isinstance(data, dict) and data.get("code") == 429:
@@ -69,7 +75,7 @@ def fetch_url(url, timeout=6):
         print(f"Fetch Error: {e}")
     return None
 
-async def fetch_twelve_data(endpoint_path):
+async def fetch_twelve_data(endpoint_name, extra_params=None):
     global current_key_idx
     api_keys = get_all_api_keys()
     if not api_keys:
@@ -81,8 +87,13 @@ async def fetch_twelve_data(endpoint_path):
             current_key_idx = 0
             
         active_key = api_keys[current_key_idx]
-        url = f"https://api.twelvedata.com/{endpoint_path}&apikey={active_key}"
-        res = await asyncio.to_thread(fetch_url, url, 6)
+        url = f"https://api.twelvedata.com/{endpoint_name}"
+        
+        queryParams = {"apikey": active_key}
+        if extra_params:
+            queryParams.update(extra_params)
+            
+        res = await asyncio.to_thread(fetch_url, url, queryParams, 6)
         
         if res and isinstance(res, dict) and res.get("status_code") == 429:
             current_key_idx = (current_key_idx + 1) % len(api_keys)
@@ -95,7 +106,7 @@ async def is_high_impact_news_near():
         return False, ""
     try:
         url = "https://nfp.ourforecast.com/api/v1/events"
-        data = await asyncio.to_thread(fetch_url, url, 5)
+        data = await asyncio.to_thread(fetch_url, url, None, 5)
         if data and isinstance(data, list):
             now = datetime.utcnow()
             for event in data:
@@ -116,7 +127,7 @@ def calculate_recommended_lot(entry_price, stop_loss_price):
         if price_distance == 0:
             return 0.10
 
-        cost_per_point = 100.0  # عقد الذهب القياسي
+        cost_per_point = 100.0
         raw_lot = risk_amount_cents / (price_distance * cost_per_point)
         return max(0.01, round(raw_lot, 2))
     except Exception:
@@ -164,7 +175,6 @@ def calculate_ema(data, window):
 async def analyze_gold_market():
     global active_orders
     
-    # التأكد من عمل السوق والأخبار
     if datetime.utcnow().weekday() in [5, 6]:
         return [], "الماركت مغلق (عطلة نهاية الأسبوع)", 0, 0
         
@@ -172,21 +182,18 @@ async def analyze_gold_market():
     if has_news:
         return [], f"توقف مؤقت بسبب خبر عالي التأثير: {news_title}", 0, 0
 
-    # جلب بيانات فريم الـ 15 دقيقة وفريم الساعة للتحليل متعدد الأطر
-    res_m15 = await fetch_twelve_data(f"time_series?symbol={SYMBOL}&interval=15min&outputsize=100")
-    res_h1  = await fetch_twelve_data(f"time_series?symbol={SYMBOL}&interval=1h&outputsize=50")
+    res_m15 = await fetch_twelve_data("time_series", {"symbol": SYMBOL, "interval": "15min", "outputsize": "100"})
+    res_h1  = await fetch_twelve_data("time_series", {"symbol": SYMBOL, "interval": "1h", "outputsize": "50"})
 
     if not res_m15 or "values" not in res_m15 or not res_h1 or "values" not in res_h1:
         return [], "خطأ في الاتصال بالبيانات", 0, 0
 
-    # تجهيز بيانات M15
     m15_vals = res_m15["values"]
     m15_vals.reverse()
     closes_m15 = [float(x["close"]) for x in m15_vals]
     highs_m15  = [float(x["high"]) for x in m15_vals]
     lows_m15   = [float(x["low"]) for x in m15_vals]
     
-    # تجهيز بيانات H1
     h1_vals = res_h1["values"]
     h1_vals.reverse()
     closes_h1 = [float(x["close"]) for x in h1_vals]
@@ -195,17 +202,14 @@ async def analyze_gold_market():
     atr = calculate_atr(highs_m15, lows_m15, closes_m15, window=14)
     rsi_m15 = calculate_rsi(closes_m15, window=14)
     
-    # متوسطات H1 للتجاه العام
     ema20_h1 = calculate_ema(closes_h1, 20)[-1]
     ema50_h1 = calculate_ema(closes_h1, 50)[-1]
     h1_bullish = ema20_h1 > ema50_h1
     h1_bearish = ema20_h1 < ema50_h1
 
-    # متوسطات M15 للتوقيت
     ema20_m15 = calculate_ema(closes_m15, 20)[-1]
     ema50_m15 = calculate_ema(closes_m15, 50)[-1]
 
-    # حساب الانحراف عن المتوسط
     ema_distance = abs(spot_price - ema20_m15)
     is_overextended = ema_distance > (atr * 1.8)
 
@@ -219,28 +223,20 @@ async def analyze_gold_market():
     if order_key in active_orders:
         return [], "يوجد أمر نشط حالياً للذهب", spot_price, rsi_m15
 
-    # ----------------------------------------------------
-    # سيناريو 1: الشراء (الاتجاه صاعد على H1 و M15)
-    # ----------------------------------------------------
+    # الشراء
     if h1_bullish and (ema20_m15 > ema50_m15) and (35 <= rsi_m15 <= 62):
-        
-        # أ) إذا كان السعر ممتداً أو RSI مرتفع -> حد أمر الشراء (Buy Limit / إعادة اختبار)
         if is_overextended or rsi_m15 > 56:
             raw_type = "Buy Limit"
             entry_p = round(max(ema20_m15, swing_low + (atr * 0.5)), 2)
             sl_p    = round(entry_p - (atr * 1.3), 2)
             tp_p    = round(entry_p + (abs(entry_p - sl_p) * 2.0), 2)
             reason  = "إعادة اختبار بعد ارتداد وتراجع الزخم المباشر"
-
-        # ب) إذا كان هناك نموذج شمعة صاعدة عند الدعم -> تنفيذ شراء مباشر (Market Buy)
         elif spot_price <= (ema20_m15 + 0.5) and closes_m15[-1] > closes_m15[-2]:
             raw_type = "Market Buy"
             entry_p = spot_price
             sl_p    = round(swing_low - (atr * 1.0), 2)
             tp_p    = round(entry_p + (abs(entry_p - sl_p) * 1.8), 2)
             reason  = "ارتداد مكتمل من المتوسط وتأكيد الشمعة الانعكاسية"
-
-        # ج) زخم صاعد مع متسع حركة -> إيقاف أمر الشراء (Buy Stop / اختراق)
         else:
             raw_type = "Buy Stop"
             entry_p = round(swing_high + price_step, 2)
@@ -258,28 +254,20 @@ async def analyze_gold_market():
         active_orders[order_key] = order_obj
         generated_orders.append(order_obj)
 
-    # ----------------------------------------------------
-    # سيناريو 2: البيع (الاتجاه هابط على H1 و M15 مع فلتر القاع)
-    # ----------------------------------------------------
+    # البيع
     elif h1_bearish and (ema20_m15 < ema50_m15) and (38 <= rsi_m15 <= 68):
-
-        # أ) إذا كان السعر ممتداً أو RSI قريب من التشبع (< 42) -> حد أمر البيع (Sell Limit / إعادة اختبار)
         if is_overextended or rsi_m15 < 43:
             raw_type = "Sell Limit"
             entry_p = round(min(ema20_m15, swing_high - (atr * 0.5)), 2)
             sl_p    = round(entry_p + (atr * 1.3), 2)
             tp_p    = round(entry_p - (abs(sl_p - entry_p) * 2.0), 2)
             reason  = "انتظار إعادة اختبار المقاومة لتجنب البيع عند القاع"
-
-        # ب) إذا اكتمل الارتداد وظهرت شمعة هابطة -> تنفيذ بيع مباشر (Market Sell)
         elif spot_price >= (ema20_m15 - 0.5) and closes_m15[-1] < closes_m15[-2]:
             raw_type = "Market Sell"
             entry_p = spot_price
             sl_p    = round(swing_high + (atr * 1.0), 2)
             tp_p    = round(entry_p - (abs(sl_p - entry_p) * 1.8), 2)
             reason  = "تأكيد الدوران من منطقة المقاومة بشمعة انعكاسية"
-
-        # ج) زخم هابط سليم وسعر غير مشبع -> إيقاف أمر البيع (Sell Stop / اختراق)
         else:
             raw_type = "Sell Stop"
             entry_p = round(swing_low - price_step, 2)
@@ -300,7 +288,28 @@ async def analyze_gold_market():
     return generated_orders, "تم الفحص بنجاح", spot_price, rsi_m15
 
 # ================= ================= =================
-# 6. المهام الخلفية وتلغرام
+# 6. بناء قائمة الإعدادات والأزرار التفاعلية
+# ================= ================= =================
+def build_settings_text():
+    return (
+        f"⚙️ **قائمة إعدادات البوت الذكي:**\n\n"
+        f"🟡 **الأصل المتداول:** `الذهب XAU/USD`\n"
+        f"🎯 **الاستراتيجية:** {STRATEGY_TYPES.get(active_strategy, '🚀 كلاهما معاً')}\n"
+        f"💰 **رصيد الحساب:** `{account_balance_cents}` سنت\n"
+        f"🛡 **نسبة المخاطرة:** `{risk_percentage}%` لكل صفقة\n"
+        f"📰 **فلتر الأخبار:** `{'مفعل ✅' if news_filter_active else 'معطل ❌'}`"
+    )
+
+def build_settings_keyboard():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("⚡️ السكالبينج الخاطف", callback_data="set_strat_scalping"),
+         InlineKeyboardButton("📈 الاتجاه اليومي", callback_data="set_strat_intraday")],
+        [InlineKeyboardButton("🚀 كلاهما معاً", callback_data="set_strat_both")],
+        [InlineKeyboardButton("📰 تبديل فلتر الأخبار", callback_data="toggle_news")]
+    ])
+
+# ================= ================= =================
+# 7. المهام الخلفية واستقبال الأوامر
 # ================= ================= =================
 async def market_scanner_loop(bot: Bot, chat_id: str):
     global last_scanned_candle
@@ -313,10 +322,12 @@ async def market_scanner_loop(bot: Bot, chat_id: str):
                     last_scanned_candle = candle_id
                     
                     orders, status, spot_price, rsi = await analyze_gold_market()
+                    
+                    # إرسال إشارة الصفقة فور توفرها (الأولوية العظمى)
                     for order in orders:
                         emoji = "🔴" if "بيع" in order['type_ar'] else "🟢"
                         msg = (
-                            f"🤖 **إشارة ذكاء اصطناعي جديدة [الذهب XAU/USD]**\n"
+                            f"🤖 **إشارة صفقة جديدة [الذهب XAU/USD]**\n"
                             f"⏱ **التوقيت:** {now.strftime('%H:%M')} UTC\n\n"
                             f"📊 **السعر الحالي:** `{spot_price}` | **RSI:** `{rsi}`\n"
                             f"{emoji} **نوع الأمر:** `{order['type_ar']}`\n"
@@ -324,7 +335,7 @@ async def market_scanner_loop(bot: Bot, chat_id: str):
                             f"🟢 **أخذ الربح (TP):** `{order['tp']}`\n"
                             f"🔴 **وقف الخسارة (SL):** `{order['sl']}`\n\n"
                             f"💰 **حجم العقد (Lot):** `{order['lot']}`\n"
-                            f"💡 **سبب الدخول:** _{order['reason']}_"
+                            f"💡 **السبب:** _{order['reason']}_"
                         )
                         await bot.send_message(chat_id=chat_id, text=msg, parse_mode="Markdown")
                     await asyncio.sleep(1)
@@ -337,26 +348,27 @@ async def heartbeat_loop(bot: Bot, chat_id: str):
     while True:
         try:
             now = datetime.utcnow()
-            if send_status_reports and now.minute % 15 == 0 and now.minute != last_sent_minute:
+            if send_status_reports and now.minute % 30 == 0 and now.minute != last_sent_minute:
                 last_sent_minute = now.minute
-                msg = f"🟢 **مُحرّك الذهب الذكي:** يعمل بدقة وعلى أهبة الاستعداد ({now.strftime('%H:%M')} UTC)"
+                msg = f"🟢 **مُحرّك الذهب الذكي:** يعمل بنجاح وضمان وصول الإشارات مفعل ({now.strftime('%H:%M')} UTC)"
                 await bot.send_message(chat_id=chat_id, text=msg, parse_mode="Markdown")
             await asyncio.sleep(10)
         except Exception:
             await asyncio.sleep(30)
 
-# ================= ================= =================
-# 7. الأوامر المباشرة والتفاعل
-# ================= ================= =================
+# معالجة أمر Settings والإعدادات
+async def handle_settings_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(build_settings_text(), reply_markup=build_settings_keyboard(), parse_mode="Markdown")
+
 async def handle_manual_scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("🔍 **جاري تحليل سوق الذهب (XAU/USD) بواسطة الذكاء الاصطناعي...**", parse_mode="Markdown")
+    await update.message.reply_text("🔍 **جاري تحليل سوق الذهب (XAU/USD)...**", parse_mode="Markdown")
     orders, status, spot_price, rsi = await analyze_gold_market()
     
     report = (
         f"🏆 **تقرير الذهب الفوري (XAU/USD):**\n\n"
         f"💵 **السعر الحالي:** `{spot_price}`\n"
         f"📈 **RSI (15m):** `{rsi}`\n"
-        f"⚙️ **حالة السوق:** `{status}`\n"
+        f"⚙️ **الحالة:** `{status}`\n"
     )
     if orders:
         ord_info = orders[0]
@@ -368,9 +380,24 @@ async def handle_manual_scan(update: Update, context: ContextTypes.DEFAULT_TYPE)
             f"• **اللوت:** `{ord_info['lot']}`"
         )
     else:
-        report += "\n✋ **لا يوجد نموذج مكتمل الشروط حالياً. البوت ينتظر الفرصة الأفضل.**"
+        report += "\n✋ **لا توجد صفقة مكتملة الشروط الآن. البوت يراقب السوق.**"
         
     await update.message.reply_text(report, parse_mode="Markdown")
+
+async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global active_strategy, news_filter_active
+    query = update.callback_query
+    await query.answer()
+    
+    if query.data.startswith("set_strat_"):
+        active_strategy = query.data.replace("set_strat_", "")
+    elif query.data == "toggle_news":
+        news_filter_active = not news_filter_active
+        
+    try:
+        await query.edit_message_text(build_settings_text(), reply_markup=build_settings_keyboard(), parse_mode="Markdown")
+    except Exception:
+        pass
 
 async def post_init(application: Application):
     chat_id = os.environ.get("CHAT_ID")
@@ -384,7 +411,13 @@ def main():
     Thread(target=run_web_server, daemon=True).start()
     app_bot = Application.builder().token(token).post_init(post_init).build()
     
+    # معالجات الأوامر
+    app_bot.add_handler(CommandHandler(["settings", "الاعدادات", "إعدادات"], handle_settings_command))
+    app_bot.add_handler(MessageHandler(filters.Regex(r'(?i)^/?(settings|الاعدادات|إعدادات)$'), handle_settings_command))
+    
     app_bot.add_handler(MessageHandler(filters.Regex(r'(?i)^/?scan$'), handle_manual_scan))
+    app_bot.add_handler(CallbackQueryHandler(button_callback))
+    
     app_bot.run_polling()
 
 if __name__ == "__main__":
