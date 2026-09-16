@@ -26,13 +26,16 @@ def run_web_server():
 # 2. المتغيرات العامة والإعدادات
 # ================= ================= =================
 SYMBOL = "XAU/USD"
-send_status_reports = True    # تفعيل/تعطيل تقارير الفحص الدوري
-news_filter_active = True     # تفعيل/تعطيل فلتر الأخبار
-account_balance_cents = 200000  
-risk_percentage = 0.5           
+send_status_reports = False    # معطلة افتراضياً لإيقاف رسائل التنبيه الدوري كل 15 دقيقة
+news_filter_active = True      # مفعل
+account_balance_cents = 200000 
+risk_percentage = 0.5          
 current_key_idx = 0
 last_scanned_candle = ""     
-active_strategy = "both"      # "scalping", "intraday", "both"
+active_strategy = "both"       # "scalping", "intraday", "both"
+
+# قائمة تتبع الأوامر المعلقة لإلغائها بعد 45 دقيقة (3 شموع)
+pending_orders_tracker = []
 
 ORDER_TRANSLATIONS = {
     "Buy Stop": "إيقاف أمر الشراء (Buy Stop)",
@@ -46,7 +49,7 @@ ORDER_TRANSLATIONS = {
 STRATEGY_TYPES = {
     "scalping": "⚡️ السكالبينج الخاطف",
     "intraday": "📈 الاتجاه اليومي",
-    "both":     "🚀 كلاهما معاً"
+    "both":     "🚀 الاستراتيجيتين معاً"
 }
 
 def get_all_api_keys():
@@ -169,7 +172,7 @@ def calculate_ema(data, window):
     return ema
 
 # ================= ================= =================
-# 5. محرك تحليل الذكاء الاصطناعي (مفتوح بدون حظر صفقات سابقة)
+# 5. محرك تحليل الذكاء الاصطناعي وإصلاح السكالبينج
 # ================= ================= =================
 async def analyze_gold_market():
     if datetime.utcnow().weekday() in [5, 6]:
@@ -207,118 +210,148 @@ async def analyze_gold_market():
     ema20_m15 = calculate_ema(closes_m15, 20)[-1]
     ema50_m15 = calculate_ema(closes_m15, 50)[-1]
 
-    ema_distance = abs(spot_price - ema20_m15)
-    is_overextended = ema_distance > (atr * 1.8)
-
     swing_high = max(highs_m15[-20:-1])
     swing_low  = min(lows_m15[-20:-1])
-    price_step = round(max(0.30, atr * 0.25), 2)
 
     generated_orders = []
 
-    # إشارات الشراء
-    if h1_bullish and (ema20_m15 > ema50_m15) and (35 <= rsi_m15 <= 62):
-        if (is_overextended or rsi_m15 > 56) and active_strategy in ["intraday", "both"]:
+    # --- ⚡️ استراتيجية السكالبينج الخاطف (مرونة عالية وشروط متجاوبة) ---
+    if active_strategy in ["scalping", "both"]:
+        # السكالبينج الشرائي
+        if (ema20_m15 > ema50_m15 or rsi_m15 <= 42) and closes_m15[-1] > closes_m15[-2]:
+            if abs(spot_price - ema20_m15) <= (atr * 0.8) and (30 <= rsi_m15 <= 65):
+                raw_type = "Market Buy"
+                entry_p = spot_price
+                sl_p    = round(min(lows_m15[-3:]) - (atr * 0.5), 2)
+                tp_p    = round(entry_p + (abs(entry_p - sl_p) * 1.5), 2)
+                reason  = "⚡️ ارتداد خاطف وتأكيد زخم الشمعة الانعكاسية (Scalp)"
+                rec_lot = calculate_recommended_lot(entry_p, sl_p)
+                
+                generated_orders.append({
+                    "symbol": SYMBOL, "type_raw": raw_type, "type_ar": ORDER_TRANSLATIONS[raw_type],
+                    "entry": entry_p, "tp": tp_p, "sl": sl_p, "lot": rec_lot, "rsi": rsi_m15, "reason": reason
+                })
+
+        # السكالبينج البيعي
+        elif (ema20_m15 < ema50_m15 or rsi_m15 >= 58) and closes_m15[-1] < closes_m15[-2]:
+            if abs(spot_price - ema20_m15) <= (atr * 0.8) and (35 <= rsi_m15 <= 70):
+                raw_type = "Market Sell"
+                entry_p = spot_price
+                sl_p    = round(max(highs_m15[-3:]) + (atr * 0.5), 2)
+                tp_p    = round(entry_p - (abs(sl_p - entry_p) * 1.5), 2)
+                reason  = "⚡️ رفض من المقاوِمَة وانعطاف هابط خاطف (Scalp)"
+                rec_lot = calculate_recommended_lot(entry_p, sl_p)
+                
+                generated_orders.append({
+                    "symbol": SYMBOL, "type_raw": raw_type, "type_ar": ORDER_TRANSLATIONS[raw_type],
+                    "entry": entry_p, "tp": tp_p, "sl": sl_p, "lot": rec_lot, "rsi": rsi_m15, "reason": reason
+                })
+
+    # --- 📈 استراتيجية الاتجاه اليومي (الأوامر المعلقة المقربة لتسهيل التفعيل) ---
+    if active_strategy in ["intraday", "both"] and not generated_orders:
+        if h1_bullish and (35 <= rsi_m15 <= 62):
             raw_type = "Buy Limit"
-            entry_p = round(max(ema20_m15, swing_low + (atr * 0.5)), 2)
-            sl_p    = round(entry_p - (atr * 1.3), 2)
-            tp_p    = round(entry_p + (abs(entry_p - sl_p) * 2.0), 2)
-            reason  = "إعادة اختبار بعد ارتداد وتراجع الزخم المباشر"
-        elif spot_price <= (ema20_m15 + 0.5) and closes_m15[-1] > closes_m15[-2] and active_strategy in ["scalping", "both"]:
-            raw_type = "Market Buy"
-            entry_p = spot_price
-            sl_p    = round(swing_low - (atr * 1.0), 2)
+            entry_p = round(spot_price - (atr * 0.35) + 0.25, 2)
+            sl_p    = round(entry_p - (atr * 1.2), 2)
             tp_p    = round(entry_p + (abs(entry_p - sl_p) * 1.8), 2)
-            reason  = "ارتداد مكتمل من المتوسط وتأكيد الشمعة الانعكاسية"
-        else:
-            raw_type = "Buy Stop"
-            entry_p = round(swing_high + price_step, 2)
-            sl_p    = round(swing_low - (atr * 1.0), 2)
-            tp_p    = round(entry_p + (abs(entry_p - sl_p) * 1.8), 2)
-            reason  = "اختراق اختراقي مع زخم متوازن للاتجاه الصاعد"
+            reason  = "📈 حد شراء بالقرب من الدعم لتأكيد الاتجاه الصاعد"
+            rec_lot = calculate_recommended_lot(entry_p, sl_p)
+            
+            generated_orders.append({
+                "symbol": SYMBOL, "type_raw": raw_type, "type_ar": ORDER_TRANSLATIONS[raw_type],
+                "entry": entry_p, "tp": tp_p, "sl": sl_p, "lot": rec_lot, "rsi": rsi_m15, "reason": reason
+            })
 
-        rec_lot = calculate_recommended_lot(entry_p, sl_p)
-        generated_orders.append({
-            "symbol": SYMBOL,
-            "type_raw": raw_type, "type_ar": ORDER_TRANSLATIONS[raw_type],
-            "entry": entry_p, "tp": tp_p, "sl": sl_p,
-            "lot": rec_lot, "rsi": rsi_m15, "reason": reason
-        })
-
-    # إشارات البيع
-    elif h1_bearish and (ema20_m15 < ema50_m15) and (38 <= rsi_m15 <= 68):
-        if (is_overextended or rsi_m15 < 43) and active_strategy in ["intraday", "both"]:
+        elif h1_bearish and (38 <= rsi_m15 <= 68):
             raw_type = "Sell Limit"
-            entry_p = round(min(ema20_m15, swing_high - (atr * 0.5)), 2)
-            sl_p    = round(entry_p + (atr * 1.3), 2)
-            tp_p    = round(entry_p - (abs(sl_p - entry_p) * 2.0), 2)
-            reason  = "انتظار إعادة اختبار المقاومة لتجنب البيع عند القاع"
-        elif spot_price >= (ema20_m15 - 0.5) and closes_m15[-1] < closes_m15[-2] and active_strategy in ["scalping", "both"]:
-            raw_type = "Market Sell"
-            entry_p = spot_price
-            sl_p    = round(swing_high + (atr * 1.0), 2)
+            entry_p = round(spot_price + (atr * 0.35), 2)
+            sl_p    = round(entry_p + (atr * 1.2), 2)
             tp_p    = round(entry_p - (abs(sl_p - entry_p) * 1.8), 2)
-            reason  = "تأكيد الدوران من منطقة المقاومة بشمعة انعكاسية"
-        else:
-            raw_type = "Sell Stop"
-            entry_p = round(swing_low - price_step, 2)
-            sl_p    = round(swing_high + (atr * 1.0), 2)
-            tp_p    = round(entry_p - (abs(sl_p - entry_p) * 1.8), 2)
-            reason  = "اختراق هابط مع حجم وزخم سليم دون تشبع بيعي"
-
-        rec_lot = calculate_recommended_lot(entry_p, sl_p)
-        generated_orders.append({
-            "symbol": SYMBOL,
-            "type_raw": raw_type, "type_ar": ORDER_TRANSLATIONS[raw_type],
-            "entry": entry_p, "tp": tp_p, "sl": sl_p,
-            "lot": rec_lot, "rsi": rsi_m15, "reason": reason
-        })
+            reason  = "📈 حد بيع بالقرب من المقاومة لتأكيد الاتجاه الهابط"
+            rec_lot = calculate_recommended_lot(entry_p, sl_p)
+            
+            generated_orders.append({
+                "symbol": SYMBOL, "type_raw": raw_type, "type_ar": ORDER_TRANSLATIONS[raw_type],
+                "entry": entry_p, "tp": tp_p, "sl": sl_p, "lot": rec_lot, "rsi": rsi_m15, "reason": reason
+            })
 
     return generated_orders, "تم الفحص بنجاح", spot_price, rsi_m15
 
 # ================= ================= =================
-# 6. استعادة لوحة الإعدادات الشاملة والأزرار
+# 6. بناء لوحة الإعدادات والمظهر المطابق للقطة الشاشة
 # ================= ================= =================
 def build_settings_text():
+    keys_count = len(get_all_api_keys())
+    news_status = "مفعل ✅" if news_filter_active else "معطل ❌"
+    heartbeat_status = "مفعلة 🟢" if send_status_reports else "معطلة 🔴"
+    
     return (
-        f"⚙️ **لوحة تحكم وإعدادات البوت الذكي:**\n\n"
-        f"🟡 **زوج التداول:** `الذهب XAU/USD`\n"
-        f"⏱ **دورة الفحص الآلي:** `كل 15 دقيقة`\n"
-        f"🎯 **نمط الاستراتيجية:** {STRATEGY_TYPES.get(active_strategy, '🚀 كلاهما معاً')}\n"
-        f"💰 **رصيد الحساب المخصص:** `{account_balance_cents}` سنت\n"
-        f"🛡 **المخاطرة لكل صفقة:** `{risk_percentage}%`\n"
-        f"📰 **فلتر الأخبار الاقتصادية:** `{'مفعل ✅' if news_filter_active else 'معطل ❌'}`\n"
-        f"🔔 **تقارير حالة البوت (15m):** `{'مفعلة ✅' if send_status_reports else 'معطلة ❌'}`\n\n"
-        f"👇 _يمكنك التعديل مباشرة عبر الأزرار أدناه:_"
+        f"⚙️ **تقرير وإعدادات البوت الحالية:**\n\n"
+        f"🌐 **نطاق الأصول:** 🟡 `الذهب فقط`\n"
+        f"🎯 **نمط الاستراتيجية:** {STRATEGY_TYPES.get(active_strategy, '🚀 الاستراتيجيتين معاً')}\n"
+        f"🎛 **نمط المؤشرات:** `مرن (Flexible)`\n"
+        f"📐 **تعديل الأهداف والستوب:** `تكيفي مفعل 🤖 (مسار مستقل لكل استراتيجية)`\n"
+        f"🟢 **فلتر الأخبار:** `{news_status}`\n"
+        f"🎯 **نسبة المخاطرة:** `{risk_percentage}% لكل صفقة`\n"
+        f"💰 **رصيد الحساب:** `{account_balance_cents} سنت`\n"
+        f"📡 **رسائل نبض الحياة:** `{heartbeat_status}`\n"
+        f"🔑 **مفاتيح API المستكشفة:** `{keys_count}`"
     )
 
 def build_settings_keyboard():
-    news_btn_text = "📰 فلتر الأخبار: مفعل ✅" if news_filter_active else "📰 فلتر الأخبار: معطل ❌"
-    reports_btn_text = "🔔 التقارير: مفعلة ✅" if send_status_reports else "🔔 التقارير: معطلة ❌"
+    strat_text = f"🎯 الاستراتيجية: {STRATEGY_TYPES.get(active_strategy, '🚀 الاستراتيجيتين معاً')}"
+    news_text = "🟢 فلتر الأخبار: مفعل" if news_filter_active else "🔴 فلتر الأخبار: معطل"
+    heartbeat_text = "🟢 إيقاف نبض الحياة" if send_status_reports else "🔴 تشغيل نبض الحياة"
     
     return InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("⚡️ السكالبينج", callback_data="set_strat_scalping"),
-            InlineKeyboardButton("📈 الاتجاه اليومي", callback_data="set_strat_intraday")
-        ],
-        [
-            InlineKeyboardButton("🚀 كلاهما معاً", callback_data="set_strat_both")
-        ],
-        [
-            InlineKeyboardButton(news_btn_text, callback_data="toggle_news"),
-            InlineKeyboardButton(reports_btn_text, callback_data="toggle_reports")
-        ]
+        [InlineKeyboardButton("🌐 النطاق: 🟡 الذهب فقط", callback_data="none")],
+        [InlineKeyboardButton(strat_text, callback_data="toggle_strategy")],
+        [InlineKeyboardButton("🎛 النمط: مرن", callback_data="none")],
+        [InlineKeyboardButton(heartbeat_text, callback_data="toggle_reports")],
+        [InlineKeyboardButton(news_text, callback_data="toggle_news")],
+        [InlineKeyboardButton(f"🎯 نسبة المخاطرة: {risk_percentage}%", callback_data="none")],
+        [InlineKeyboardButton(f"💰 الرصيد: {account_balance_cents} سنت", callback_data="none")]
     ])
 
 # ================= ================= =================
-# 7. المهام الخلفية واستقبال الأوامر (كل 15 دقيقة)
+# 7. فحص صلاحية الأوامر المعلقة وإرسال الإلغاء
+# ================= ================= =================
+async def check_and_cancel_expired_orders(bot: Bot, chat_id: str):
+    global pending_orders_tracker
+    current_time = time.time()
+    remaining_orders = []
+
+    for order in pending_orders_tracker:
+        # إلغاء الأمر إذا مرت 45 دقيقة (2700 ثانية) ولم يتفعل
+        if current_time - order["created_at"] >= 2700:
+            cancel_msg = (
+                f"⚠️ **تنبيه إلغاء أمر معلق [XAU/USD]**\n\n"
+                f"❌ **نوع الأمر:** `{order['type_ar']}`\n"
+                f"📍 **سعر الدخول المقترح:** `{order['entry']}`\n"
+                f"⏱ **السبب:** انتهت الصلاحية (مضي 45 دقيقة دون ملامسة السعر لحماية الحساب)."
+            )
+            try:
+                await bot.send_message(chat_id=chat_id, text=cancel_msg, parse_mode="Markdown")
+            except Exception as e:
+                print(f"Cancel Msg Error: {e}")
+        else:
+            remaining_orders.append(order)
+
+    pending_orders_tracker = remaining_orders
+
+# ================= ================= =================
+# 8. المهام الخلفية واستقبال الأوامر
 # ================= ================= =================
 async def market_scanner_loop(bot: Bot, chat_id: str):
-    global last_scanned_candle
+    global last_scanned_candle, pending_orders_tracker
     while True:
         try:
             now = datetime.utcnow()
-            # الفحص الدقيق عند إغلاق شمعة 15 دقيقة (:00, :15, :30, :45)
+            
+            # فحص إلغاء الأوامر المنتهية الصلاحية
+            await check_and_cancel_expired_orders(bot, chat_id)
+
+            # الفحص عند إغلاق الشمعة كل 15 دقيقة (:00, :15, :30, :45)
             if now.minute % 15 == 0:
                 candle_id = now.strftime("%Y-%m-%d %H:%M")
                 if candle_id != last_scanned_candle:
@@ -340,6 +373,14 @@ async def market_scanner_loop(bot: Bot, chat_id: str):
                             f"💡 **السبب:** _{order['reason']}_"
                         )
                         await bot.send_message(chat_id=chat_id, text=msg, parse_mode="Markdown")
+
+                        # إذا كان أمراً معلقاً، يتم تتبعه لإلغائه إذا لم يتفعل
+                        if "Limit" in order["type_raw"] or "Stop" in order["type_raw"]:
+                            pending_orders_tracker.append({
+                                "type_ar": order["type_ar"],
+                                "entry": order["entry"],
+                                "created_at": time.time()
+                            })
                     await asyncio.sleep(1)
         except Exception as e:
             print(f"Scanner Loop Error: {e}")
@@ -350,7 +391,7 @@ async def heartbeat_loop(bot: Bot, chat_id: str):
     while True:
         try:
             now = datetime.utcnow()
-            # إرسال تقرير حالة البوت كل 15 دقيقة إذا كانت التقارير مفعلة
+            # ترسل الرسائل فقط إذا تم تفعيل الخيار من اللوحة يدوياً
             if send_status_reports and now.minute % 15 == 0 and now.minute != last_sent_minute:
                 last_sent_minute = now.minute
                 msg = f"🟢 **مُحرّك الذهب الذكي:** يعمل بنجاح ويقوم بالمسح الدوري كل 15 دقيقة ({now.strftime('%H:%M')} UTC)"
@@ -391,8 +432,13 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     
-    if query.data.startswith("set_strat_"):
-        active_strategy = query.data.replace("set_strat_", "")
+    if query.data == "toggle_strategy":
+        if active_strategy == "both":
+            active_strategy = "scalping"
+        elif active_strategy == "scalping":
+            active_strategy = "intraday"
+        else:
+            active_strategy = "both"
     elif query.data == "toggle_news":
         news_filter_active = not news_filter_active
     elif query.data == "toggle_reports":
