@@ -23,19 +23,24 @@ def run_web_server():
     app.run(host="0.0.0.0", port=port)
 
 # ================= ================= =================
-# 2. المتغيرات العامة والإعدادات
+# 2. المتغيرات العامة والإعدادات والعدادات
 # ================= ================= =================
 SYMBOL = "XAU/USD"
-send_status_reports = False    # معطلة افتراضياً لإيقاف رسائل التنبيه الدوري كل 15 دقيقة
-news_filter_active = True      # مفعل
+send_status_reports = False    # معطلة افتراضياً لإيقاف نبض الحياة الدوري
+news_filter_active = True      
 account_balance_cents = 200000 
 risk_percentage = 0.5          
 current_key_idx = 0
 last_scanned_candle = ""     
 active_strategy = "both"       # "scalping", "intraday", "both"
 
-# قائمة تتبع الأوامر المعلقة لإلغائها بعد 45 دقيقة (3 شموع)
+# العدادات التسلسلية لكل استراتيجية
+scalp_id_counter = 100
+intraday_id_counter = 100
+
+# تتبع الصفقات لمنع التكرار وقائمة الأوامر المعلقة
 pending_orders_tracker = []
+recent_sent_signals = {} # { "scalping": {"entry": float, "type": str, "time": float}, ... }
 
 ORDER_TRANSLATIONS = {
     "Buy Stop": "إيقاف أمر الشراء (Buy Stop)",
@@ -172,8 +177,17 @@ def calculate_ema(data, window):
     return ema
 
 # ================= ================= =================
-# 5. محرك تحليل الذكاء الاصطناعي وإصلاح السكالبينج
+# 5. محرك تحليل الذكاء الاصطناعي مع منع التكرار القريب
 # ================= ================= =================
+def is_near_duplicate(strategy_tag, raw_type, entry_price):
+    if strategy_tag in recent_sent_signals:
+        last_sig = recent_sent_signals[strategy_tag]
+        # إذا كانت بنفس الاتجاه وسعر الدخول بفارق أقل من 1.5$ ومرت أقل من ساعتين
+        if last_sig["type"] == raw_type and abs(entry_price - last_sig["entry"]) < 1.50:
+            if (time.time() - last_sig["time"]) < 7200:
+                return True
+    return False
+
 async def analyze_gold_market():
     if datetime.utcnow().weekday() in [5, 6]:
         return [], "الماركت مغلق (عطلة نهاية الأسبوع)", 0, 0
@@ -210,75 +224,78 @@ async def analyze_gold_market():
     ema20_m15 = calculate_ema(closes_m15, 20)[-1]
     ema50_m15 = calculate_ema(closes_m15, 50)[-1]
 
-    swing_high = max(highs_m15[-20:-1])
-    swing_low  = min(lows_m15[-20:-1])
-
     generated_orders = []
 
-    # --- ⚡️ استراتيجية السكالبينج الخاطف (مرونة عالية وشروط متجاوبة) ---
+    # --- ⚡️ استراتيجية السكالبينج الخاطف ---
     if active_strategy in ["scalping", "both"]:
-        # السكالبينج الشرائي
         if (ema20_m15 > ema50_m15 or rsi_m15 <= 42) and closes_m15[-1] > closes_m15[-2]:
             if abs(spot_price - ema20_m15) <= (atr * 0.8) and (30 <= rsi_m15 <= 65):
                 raw_type = "Market Buy"
                 entry_p = spot_price
-                sl_p    = round(min(lows_m15[-3:]) - (atr * 0.5), 2)
-                tp_p    = round(entry_p + (abs(entry_p - sl_p) * 1.5), 2)
-                reason  = "⚡️ ارتداد خاطف وتأكيد زخم الشمعة الانعكاسية (Scalp)"
-                rec_lot = calculate_recommended_lot(entry_p, sl_p)
-                
-                generated_orders.append({
-                    "symbol": SYMBOL, "type_raw": raw_type, "type_ar": ORDER_TRANSLATIONS[raw_type],
-                    "entry": entry_p, "tp": tp_p, "sl": sl_p, "lot": rec_lot, "rsi": rsi_m15, "reason": reason
-                })
+                if not is_near_duplicate("scalping", raw_type, entry_p):
+                    sl_p    = round(min(lows_m15[-3:]) - (atr * 0.5), 2)
+                    tp_p    = round(entry_p + (abs(entry_p - sl_p) * 1.5), 2)
+                    reason  = "⚡️ ارتداد خاطف وتأكيد زخم الشمعة الانعكاسية (Scalp)"
+                    rec_lot = calculate_recommended_lot(entry_p, sl_p)
+                    
+                    generated_orders.append({
+                        "symbol": SYMBOL, "type_raw": raw_type, "type_ar": ORDER_TRANSLATIONS[raw_type],
+                        "entry": entry_p, "tp": tp_p, "sl": sl_p, "lot": rec_lot, "rsi": rsi_m15, "reason": reason,
+                        "strategy_tag": "scalping", "strategy_name_ar": "⚡️ السكالبينج الخاطف"
+                    })
 
-        # السكالبينج البيعي
         elif (ema20_m15 < ema50_m15 or rsi_m15 >= 58) and closes_m15[-1] < closes_m15[-2]:
             if abs(spot_price - ema20_m15) <= (atr * 0.8) and (35 <= rsi_m15 <= 70):
                 raw_type = "Market Sell"
                 entry_p = spot_price
-                sl_p    = round(max(highs_m15[-3:]) + (atr * 0.5), 2)
-                tp_p    = round(entry_p - (abs(sl_p - entry_p) * 1.5), 2)
-                reason  = "⚡️ رفض من المقاوِمَة وانعطاف هابط خاطف (Scalp)"
-                rec_lot = calculate_recommended_lot(entry_p, sl_p)
-                
-                generated_orders.append({
-                    "symbol": SYMBOL, "type_raw": raw_type, "type_ar": ORDER_TRANSLATIONS[raw_type],
-                    "entry": entry_p, "tp": tp_p, "sl": sl_p, "lot": rec_lot, "rsi": rsi_m15, "reason": reason
-                })
+                if not is_near_duplicate("scalping", raw_type, entry_p):
+                    sl_p    = round(max(highs_m15[-3:]) + (atr * 0.5), 2)
+                    tp_p    = round(entry_p - (abs(sl_p - entry_p) * 1.5), 2)
+                    reason  = "⚡️ رفض من المقاوِمَة وانعطاف هابط خاطف (Scalp)"
+                    rec_lot = calculate_recommended_lot(entry_p, sl_p)
+                    
+                    generated_orders.append({
+                        "symbol": SYMBOL, "type_raw": raw_type, "type_ar": ORDER_TRANSLATIONS[raw_type],
+                        "entry": entry_p, "tp": tp_p, "sl": sl_p, "lot": rec_lot, "rsi": rsi_m15, "reason": reason,
+                        "strategy_tag": "scalping", "strategy_name_ar": "⚡️ السكالبينج الخاطف"
+                    })
 
-    # --- 📈 استراتيجية الاتجاه اليومي (الأوامر المعلقة المقربة لتسهيل التفعيل) ---
+    # --- 📈 استراتيجية الاتجاه اليومي ---
     if active_strategy in ["intraday", "both"] and not generated_orders:
         if h1_bullish and (35 <= rsi_m15 <= 62):
             raw_type = "Buy Limit"
             entry_p = round(spot_price - (atr * 0.35) + 0.25, 2)
-            sl_p    = round(entry_p - (atr * 1.2), 2)
-            tp_p    = round(entry_p + (abs(entry_p - sl_p) * 1.8), 2)
-            reason  = "📈 حد شراء بالقرب من الدعم لتأكيد الاتجاه الصاعد"
-            rec_lot = calculate_recommended_lot(entry_p, sl_p)
-            
-            generated_orders.append({
-                "symbol": SYMBOL, "type_raw": raw_type, "type_ar": ORDER_TRANSLATIONS[raw_type],
-                "entry": entry_p, "tp": tp_p, "sl": sl_p, "lot": rec_lot, "rsi": rsi_m15, "reason": reason
-            })
+            if not is_near_duplicate("intraday", raw_type, entry_p):
+                sl_p    = round(entry_p - (atr * 1.2), 2)
+                tp_p    = round(entry_p + (abs(entry_p - sl_p) * 1.8), 2)
+                reason  = "📈 حد شراء بالقرب من الدعم لتأكيد الاتجاه الصاعد"
+                rec_lot = calculate_recommended_lot(entry_p, sl_p)
+                
+                generated_orders.append({
+                    "symbol": SYMBOL, "type_raw": raw_type, "type_ar": ORDER_TRANSLATIONS[raw_type],
+                    "entry": entry_p, "tp": tp_p, "sl": sl_p, "lot": rec_lot, "rsi": rsi_m15, "reason": reason,
+                    "strategy_tag": "intraday", "strategy_name_ar": "📈 الاتجاه اليومي"
+                })
 
         elif h1_bearish and (38 <= rsi_m15 <= 68):
             raw_type = "Sell Limit"
             entry_p = round(spot_price + (atr * 0.35), 2)
-            sl_p    = round(entry_p + (atr * 1.2), 2)
-            tp_p    = round(entry_p - (abs(sl_p - entry_p) * 1.8), 2)
-            reason  = "📈 حد بيع بالقرب من المقاومة لتأكيد الاتجاه الهابط"
-            rec_lot = calculate_recommended_lot(entry_p, sl_p)
-            
-            generated_orders.append({
-                "symbol": SYMBOL, "type_raw": raw_type, "type_ar": ORDER_TRANSLATIONS[raw_type],
-                "entry": entry_p, "tp": tp_p, "sl": sl_p, "lot": rec_lot, "rsi": rsi_m15, "reason": reason
-            })
+            if not is_near_duplicate("intraday", raw_type, entry_p):
+                sl_p    = round(entry_p + (atr * 1.2), 2)
+                tp_p    = round(entry_p - (abs(sl_p - entry_p) * 1.8), 2)
+                reason  = "📈 حد بيع بالقرب من المقاومة لتأكيد الاتجاه الهابط"
+                rec_lot = calculate_recommended_lot(entry_p, sl_p)
+                
+                generated_orders.append({
+                    "symbol": SYMBOL, "type_raw": raw_type, "type_ar": ORDER_TRANSLATIONS[raw_type],
+                    "entry": entry_p, "tp": tp_p, "sl": sl_p, "lot": rec_lot, "rsi": rsi_m15, "reason": reason,
+                    "strategy_tag": "intraday", "strategy_name_ar": "📈 الاتجاه اليومي"
+                })
 
     return generated_orders, "تم الفحص بنجاح", spot_price, rsi_m15
 
 # ================= ================= =================
-# 6. بناء لوحة الإعدادات والمظهر المطابق للقطة الشاشة
+# 6. بناء لوحة الإعدادات (مطابقة تماماً للصورة)
 # ================= ================= =================
 def build_settings_text():
     keys_count = len(get_all_api_keys())
@@ -301,7 +318,7 @@ def build_settings_text():
 def build_settings_keyboard():
     strat_text = f"🎯 الاستراتيجية: {STRATEGY_TYPES.get(active_strategy, '🚀 الاستراتيجيتين معاً')}"
     news_text = "🟢 فلتر الأخبار: مفعل" if news_filter_active else "🔴 فلتر الأخبار: معطل"
-    heartbeat_text = "🟢 إيقاف نبض الحياة" if send_status_reports else "🔴 تشغيل نبض الحياة"
+    heartbeat_text = "🟢 تشغيل نبض الحياة" if send_status_reports else "🔴 تشغيل نبض الحياة"
     
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("🌐 النطاق: 🟡 الذهب فقط", callback_data="none")],
@@ -314,7 +331,7 @@ def build_settings_keyboard():
     ])
 
 # ================= ================= =================
-# 7. فحص صلاحية الأوامر المعلقة وإرسال الإلغاء
+# 7. فحص صلاحية الأوامر المعلقة مع المرجع التسلسلي
 # ================= ================= =================
 async def check_and_cancel_expired_orders(bot: Bot, chat_id: str):
     global pending_orders_tracker
@@ -326,9 +343,11 @@ async def check_and_cancel_expired_orders(bot: Bot, chat_id: str):
         if current_time - order["created_at"] >= 2700:
             cancel_msg = (
                 f"⚠️ **تنبيه إلغاء أمر معلق [XAU/USD]**\n\n"
+                f"🆔 **رقم الصفقة الملغاة:** `{order['order_id']}`\n"
+                f"🎯 **الاستراتيجية:** `{order['strategy_name_ar']}`\n"
                 f"❌ **نوع الأمر:** `{order['type_ar']}`\n"
                 f"📍 **سعر الدخول المقترح:** `{order['entry']}`\n"
-                f"⏱ **السبب:** انتهت الصلاحية (مضي 45 دقيقة دون ملامسة السعر لحماية الحساب)."
+                f"⏱ **السبب:** انتهت الصلاحية (مرور 45 دقيقة دون ملامسة السعر لحماية الحساب)."
             )
             try:
                 await bot.send_message(chat_id=chat_id, text=cancel_msg, parse_mode="Markdown")
@@ -343,15 +362,12 @@ async def check_and_cancel_expired_orders(bot: Bot, chat_id: str):
 # 8. المهام الخلفية واستقبال الأوامر
 # ================= ================= =================
 async def market_scanner_loop(bot: Bot, chat_id: str):
-    global last_scanned_candle, pending_orders_tracker
+    global last_scanned_candle, pending_orders_tracker, scalp_id_counter, intraday_id_counter, recent_sent_signals
     while True:
         try:
             now = datetime.utcnow()
-            
-            # فحص إلغاء الأوامر المنتهية الصلاحية
             await check_and_cancel_expired_orders(bot, chat_id)
 
-            # الفحص عند إغلاق الشمعة كل 15 دقيقة (:00, :15, :30, :45)
             if now.minute % 15 == 0:
                 candle_id = now.strftime("%Y-%m-%d %H:%M")
                 if candle_id != last_scanned_candle:
@@ -360,9 +376,19 @@ async def market_scanner_loop(bot: Bot, chat_id: str):
                     orders, status, spot_price, rsi = await analyze_gold_market()
                     
                     for order in orders:
+                        # توليد رقم تسلسلي للمرجعية
+                        if order["strategy_tag"] == "scalping":
+                            scalp_id_counter += 1
+                            order_id = f"#SCALP-{scalp_id_counter}"
+                        else:
+                            intraday_id_counter += 1
+                            order_id = f"#INTRA-{intraday_id_counter}"
+
                         emoji = "🔴" if "بيع" in order['type_ar'] else "🟢"
                         msg = (
                             f"🤖 **إشارة صفقة جديدة [الذهب XAU/USD]**\n"
+                            f"🆔 **رقم الصفقة:** `{order_id}`\n"
+                            f"🎯 **الاستراتيجية:** `{order['strategy_name_ar']}`\n"
                             f"⏱ **التوقيت:** {now.strftime('%H:%M')} UTC\n\n"
                             f"📊 **السعر الحالي:** `{spot_price}` | **RSI:** `{rsi}`\n"
                             f"{emoji} **نوع الأمر:** `{order['type_ar']}`\n"
@@ -374,9 +400,18 @@ async def market_scanner_loop(bot: Bot, chat_id: str):
                         )
                         await bot.send_message(chat_id=chat_id, text=msg, parse_mode="Markdown")
 
-                        # إذا كان أمراً معلقاً، يتم تتبعه لإلغائه إذا لم يتفعل
+                        # حفظ الصفقة الأخيرة لمنع التكرار
+                        recent_sent_signals[order["strategy_tag"]] = {
+                            "entry": order["entry"],
+                            "type": order["type_raw"],
+                            "time": time.time()
+                        }
+
+                        # حفظ الأوامر المعلقة لتتبع إلغائها
                         if "Limit" in order["type_raw"] or "Stop" in order["type_raw"]:
                             pending_orders_tracker.append({
+                                "order_id": order_id,
+                                "strategy_name_ar": order["strategy_name_ar"],
                                 "type_ar": order["type_ar"],
                                 "entry": order["entry"],
                                 "created_at": time.time()
@@ -391,7 +426,6 @@ async def heartbeat_loop(bot: Bot, chat_id: str):
     while True:
         try:
             now = datetime.utcnow()
-            # ترسل الرسائل فقط إذا تم تفعيل الخيار من اللوحة يدوياً
             if send_status_reports and now.minute % 15 == 0 and now.minute != last_sent_minute:
                 last_sent_minute = now.minute
                 msg = f"🟢 **مُحرّك الذهب الذكي:** يعمل بنجاح ويقوم بالمسح الدوري كل 15 دقيقة ({now.strftime('%H:%M')} UTC)"
@@ -416,14 +450,14 @@ async def handle_manual_scan(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if orders:
         for ord_info in orders:
             report += (
-                f"\n🎯 **صفقة مكتشفة:**\n"
+                f"\n🎯 **صفقة مكتشفة ({ord_info['strategy_name_ar']}):**\n"
                 f"• **الأمر:** `{ord_info['type_ar']}`\n"
                 f"• **الدخول:** `{ord_info['entry']}`\n"
                 f"• **TP:** `{ord_info['tp']}` | **SL:** `{ord_info['sl']}`\n"
                 f"• **اللوت:** `{ord_info['lot']}`\n"
             )
     else:
-        report += "\n✋ **لا توجد صفقة مكتملة الشروط في هذه اللحظة.**"
+        report += "\n✋ **لا توجد صفقة جديدة مكتملة الشروط في هذه اللحظة.**"
         
     await update.message.reply_text(report, parse_mode="Markdown")
 
@@ -461,7 +495,6 @@ def main():
     Thread(target=run_web_server, daemon=True).start()
     app_bot = Application.builder().token(token).post_init(post_init).build()
     
-    # أوامر الأزرار والرسائل النصية باللغتين العربية والإنجليزية
     app_bot.add_handler(CommandHandler("settings", handle_settings_command))
     app_bot.add_handler(MessageHandler(filters.Regex(r'(?i)^/?(settings|الاعدادات|إعدادات)$'), handle_settings_command))
     
