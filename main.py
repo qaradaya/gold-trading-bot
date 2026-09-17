@@ -16,31 +16,41 @@ app = Flask(__name__)
 @app.route('/')
 @app.route('/ping')
 def home():
-    return "XAUUSD High-Confluence AI Engine is Active!"
+    return "XAUUSD Dual VIP Smart Engine is Live!"
 
 def run_web_server():
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
 
 # ================= ================= =================
-# 2. المتغيرات العامة والإعدادات
+# 2. المتغيرات العامة والعدادات
 # ================= ================= =================
 SYMBOL = "XAU/USD"
-send_status_reports = False    
 news_filter_active = True      
 account_balance_cents = 200000 
 risk_percentage = 0.5          
 current_key_idx = 0
 last_scanned_candle = ""     
+active_strategy = "both"       # "scalping", "intraday", "both"
 
-vip_id_counter = 500  # عداد الصفقات القوية
-last_sent_signal_time = 0 # لمنع تكرار الصفقات خلال نفس الفترة
+# عدادات تسلسلية مميزة
+scalp_id_counter = 200
+trend_id_counter = 500
+
+# سجل الصفقات لمنع التكرار القريب
+recent_sent_signals = {} 
 
 ORDER_TRANSLATIONS = {
+    "Market Buy": "تنفيذ شراء مباشر (Market Buy)",
+    "Market Sell": "تنفيذ بيع مباشر (Market Sell)",
     "Buy Limit": "حد شراء مع التصحيح (Buy Limit)",
-    "Sell Limit": "حد بيع مع التصحيح (Sell Limit)",
-    "Market Buy": "شراء مباشر تأكيدي (Market Buy)",
-    "Market Sell": "بيع مباشر تأكيدي (Market Sell)"
+    "Sell Limit": "حد بيع مع التصحيح (Sell Limit)"
+}
+
+STRATEGY_NAMES = {
+    "scalping": "⚡️ السكالبينج الخاطف الذكي (Scalp VIP)",
+    "intraday": "📈 الاتجاه اليومي الفائق (Trend VIP)",
+    "both":     "🚀 الاستراتيجيتين معاً (VIP Dual)"
 }
 
 def get_all_api_keys():
@@ -52,7 +62,7 @@ def get_all_api_keys():
     return keys
 
 # ================= ================= =================
-# 3. جلب البيانات والتحقق من أوقات السيولة
+# 3. جلب البيانات والتحقق من الجلسات والسيولة
 # ================= ================= =================
 def fetch_url(url, params=None, timeout=6):
     try:
@@ -95,9 +105,8 @@ async def fetch_twelve_data(endpoint_name, extra_params=None):
     return {"status_code": 429}
 
 def is_liquidity_session():
-    """التحقق من أن الوقت الحالي ضمن جلسة لندن أو نيويورك (07:00 إلى 17:00 UTC)"""
+    """التحقق من أوقات سيولة لندن ونيويورك (07:00 إلى 17:00 UTC)"""
     now_utc = datetime.utcnow()
-    # تجنب التداول في عطلة نهاية الأسبوع
     if now_utc.weekday() in [5, 6]:
         return False, "الماركت مغلق (عطلة نهاية الأسبوع)"
     
@@ -105,7 +114,7 @@ def is_liquidity_session():
     if 7 <= hour < 17:
         return True, "جلسة تداول نشطة (لندن / نيويورك)"
     else:
-        return False, "خارج أوقات السيولة الرئيسية (يتم تجاهل التذبذب الآسيوي)"
+        return False, "خارج أوقات السيولة (يتم تجاهل التذبذب العشوائي)"
 
 async def is_high_impact_news_near():
     if not news_filter_active:
@@ -126,8 +135,17 @@ async def is_high_impact_news_near():
         print(f"News API Error: {e}")
     return False, ""
 
+def is_near_duplicate(strategy_tag, raw_type, entry_price):
+    """منع إرسال صفقات مكررة بنفس السعر والاتجاه لنفس الاستراتيجية خلال ساعتين"""
+    if strategy_tag in recent_sent_signals:
+        last_sig = recent_sent_signals[strategy_tag]
+        if last_sig["type"] == raw_type and abs(entry_price - last_sig["entry"]) < 1.50:
+            if (time.time() - last_sig["time"]) < 7200:
+                return True
+    return False
+
 # ================= ================= =================
-# 4. المؤشرات الفنية وتحليل قمم وقيعان الهيكل الثابتة
+# 4. الحسابات الفنية والمؤشرات
 # ================= ================= =================
 def calculate_ema(data, window):
     if not data or len(data) < window: return [0] * len(data)
@@ -162,25 +180,6 @@ def calculate_rsi(closes, window=14):
     rs = avg_gain / avg_loss
     return round(100 - (100 / (1 + rs)), 2)
 
-def find_confirmed_pivots(highs, lows, left=3, right=3):
-    """تحديد القمم والقيعان الهيكلية المؤكدة بدون إمكانية إعادة الرسم (Non-Repainting)"""
-    pivot_highs = []
-    pivot_lows = []
-    
-    n = len(highs)
-    for i in range(left, n - right):
-        # القمة الهيكلية
-        if all(highs[i] > highs[i - k] for k in range(1, left + 1)) and \
-           all(highs[i] > highs[i + k] for k in range(1, right + 1)):
-            pivot_highs.append((i, highs[i]))
-            
-        # القاع الهيكلي
-        if all(lows[i] < lows[i - k] for k in range(1, left + 1)) and \
-           all(lows[i] < lows[i + k] for k in range(1, right + 1)):
-            pivot_lows.append((i, lows[i]))
-            
-    return pivot_highs, pivot_lows
-
 def calculate_recommended_lot(entry_price, stop_loss_price):
     try:
         risk_amount_cents = account_balance_cents * (risk_percentage / 100.0)
@@ -193,37 +192,32 @@ def calculate_recommended_lot(entry_price, stop_loss_price):
         return 0.10
 
 # ================= ================= =================
-# 5. محرك تحليل التوافق العالي (High-Confluence Engine)
+# 5. محرك التحليل المزدوج الذكي (Dual VIP Engine)
 # ================= ================= =================
-async def analyze_gold_market_high_confluence():
-    global last_sent_signal_time
-    
-    # 1. فحص الجلسة والسيولة
+async def analyze_gold_market_dual_engine():
     session_ok, session_msg = is_liquidity_session()
     if not session_ok:
         return [], session_msg, 0, 0
 
-    # 2. فحص الأخبار
     has_news, news_title = await is_high_impact_news_near()
     if has_news:
-        return [], f"توقف مؤقت بسبب خبر عالي التأثير: {news_title}", 0, 0
+        return [], f"توقف بسبب خبر عالي التأثير: {news_title}", 0, 0
 
-    # 3. جلب بيانات متعددة الفريمات (H4, H1, M15)
     res_h4  = await fetch_twelve_data("time_series", {"symbol": SYMBOL, "interval": "4h", "outputsize": "100"})
     res_h1  = await fetch_twelve_data("time_series", {"symbol": SYMBOL, "interval": "1h", "outputsize": "100"})
     res_m15 = await fetch_twelve_data("time_series", {"symbol": SYMBOL, "interval": "15min", "outputsize": "100"})
 
     if not res_h4 or "values" not in res_h4 or not res_h1 or "values" not in res_h1 or not res_m15 or "values" not in res_m15:
-        return [], "خطأ في جلب بيانات الفريمات المتعددة", 0, 0
+        return [], "خطأ في الاتصال بالبيانات", 0, 0
 
-    # معالجة بيانات H4
+    # fريم H4
     vals_h4 = res_h4["values"][::-1]
     closes_h4 = [float(x["close"]) for x in vals_h4]
     ema200_h4 = calculate_ema(closes_h4, 200)[-1] if len(closes_h4) >= 200 else calculate_ema(closes_h4, 50)[-1]
     h4_bullish = closes_h4[-1] > ema200_h4
     h4_bearish = closes_h4[-1] < ema200_h4
 
-    # معالجة بيانات H1
+    # فريم H1
     vals_h1 = res_h1["values"][::-1]
     closes_h1 = [float(x["close"]) for x in vals_h1]
     ema50_h1  = calculate_ema(closes_h1, 50)[-1]
@@ -231,7 +225,7 @@ async def analyze_gold_market_high_confluence():
     h1_bullish = closes_h1[-1] > ema50_h1 and ema50_h1 > ema200_h1
     h1_bearish = closes_h1[-1] < ema50_h1 and ema50_h1 < ema200_h1
 
-    # معالجة بيانات M15
+    # فريم M15
     vals_m15 = res_m15["values"][::-1]
     closes_m15 = [float(x["close"]) for x in vals_m15]
     highs_m15  = [float(x["high"]) for x in vals_m15]
@@ -240,183 +234,175 @@ async def analyze_gold_market_high_confluence():
     spot_price = round(closes_m15[-1], 2)
     atr_m15 = calculate_atr(highs_m15, lows_m15, closes_m15, window=14)
     rsi_m15 = calculate_rsi(closes_m15, window=14)
+    ema20_m15 = calculate_ema(closes_m15, 20)[-1]
     ema50_m15 = calculate_ema(closes_m15, 50)[-1]
-
-    # العثور على القمم والقيعان الهيكلية الثابتة
-    p_highs, p_lows = find_confirmed_pivots(highs_m15, lows_m15, left=3, right=3)
-    if not p_highs or not p_lows:
-        return [], "جاري جمع البيانات الهيكلية...", spot_price, rsi_m15
-
-    last_pivot_high = p_highs[-1][1]
-    last_pivot_low  = p_lows[-1][1]
 
     generated_orders = []
 
-    # ==========================================
-    # تقييم نقاط القوة والتوافق (BUY SCENARIO)
-    # ==========================================
-    if h4_bullish and h1_bullish:
-        confluence_score = 0
-        details = []
+    # ---------------------------------------------------------
+    # ⚡️ المحرك الأول: السكالبينج الخاطف الذكي (Scalp VIP)
+    # ---------------------------------------------------------
+    if active_strategy in ["scalping", "both"]:
+        # السكالبينج الشرائي: يتطلب اتفاق اتجاه H1 الصاعد + ارتداد خاطف M15
+        if h1_bullish and (closes_m15[-1] > closes_m15[-2]):
+            if (ema20_m15 > ema50_m15) and (38 <= rsi_m15 <= 55) and abs(spot_price - ema20_m15) <= (atr_m15 * 0.6):
+                raw_type = "Market Buy"
+                entry_p = spot_price
+                if not is_near_duplicate("scalping", raw_type, entry_p):
+                    sl_p    = round(min(lows_m15[-3:]) - (atr_m15 * 0.4), 2)
+                    risk_d  = abs(entry_p - sl_p)
+                    if 1.5 <= risk_d <= 4.0: # ستوب محكم للسكالبينج
+                        tp_p    = round(entry_p + (risk_d * 1.5), 2) # RRR 1:1.5
+                        rec_lot = calculate_recommended_lot(entry_p, sl_p)
+                        reason  = "⚡️ ارتداد خاطف مع اتجاه H1 الصاعد + اعادة تجميع RSI"
+                        
+                        generated_orders.append({
+                            "type_raw": raw_type, "type_ar": ORDER_TRANSLATIONS[raw_type],
+                            "entry": entry_p, "tp": tp_p, "sl": sl_p, "lot": rec_lot,
+                            "strategy_tag": "scalping", "strategy_name_ar": "⚡️ السكالبينج الخاطف الذكي (Scalp VIP)",
+                            "reason": reason
+                        })
 
-        # 1. توافق الفريم الكبيرة (مستوفى 100%)
-        confluence_score += 1
-        details.append("✅ اتجاه H4 و H1 صاعد بقوة (أعلى EMA200)")
+        # السكالبينج البيعي: يتطلب اتفاق اتجاه H1 الهابط + رفض خاطف M15
+        elif h1_bearish and (closes_m15[-1] < closes_m15[-2]):
+            if (ema20_m15 < ema50_m15) and (45 <= rsi_m15 <= 62) and abs(spot_price - ema20_m15) <= (atr_m15 * 0.6):
+                raw_type = "Market Sell"
+                entry_p = spot_price
+                if not is_near_duplicate("scalping", raw_type, entry_p):
+                    sl_p    = round(max(highs_m15[-3:]) + (atr_m15 * 0.4), 2)
+                    risk_d  = abs(sl_p - entry_p)
+                    if 1.5 <= risk_d <= 4.0:
+                        tp_p    = round(entry_p - (risk_d * 1.5), 2)
+                        rec_lot = calculate_recommended_lot(entry_p, sl_p)
+                        reason  = "⚡️ رفض من المقاومة مع اتجاه H1 الهابط + ضغط بائعي خاطف"
+                        
+                        generated_orders.append({
+                            "type_raw": raw_type, "type_ar": ORDER_TRANSLATIONS[raw_type],
+                            "entry": entry_p, "tp": tp_p, "sl": sl_p, "lot": rec_lot,
+                            "strategy_tag": "scalping", "strategy_name_ar": "⚡️ السكالبينج الخاطف الذكي (Scalp VIP)",
+                            "reason": reason
+                        })
 
-        # 2. اختبار منطقة الدعم أو تصحيح فيبوناتشي بالقرب من EMA50 على M15
-        if spot_price <= (ema50_m15 + (atr_m15 * 0.5)):
-            confluence_score += 1
-            details.append("✅ السعر في منطقة تصحيح مثالية (Pullback to Value Zone)")
+    # ---------------------------------------------------------
+    # 📈 المحرك الثاني: الاتجاه اليومي الفائق (Trend VIP)
+    # ---------------------------------------------------------
+    if active_strategy in ["intraday", "both"] and not generated_orders:
+        if h4_bullish and h1_bullish:
+            if spot_price <= (ema50_m15 + (atr_m15 * 0.4)) and (35 <= rsi_m15 <= 50):
+                raw_type = "Market Buy"
+                entry_p = spot_price
+                if not is_near_duplicate("intraday", raw_type, entry_p):
+                    sl_p    = round(min(lows_m15[-5:]) - (atr_m15 * 0.5), 2)
+                    risk_d  = abs(entry_p - sl_p)
+                    if 2.5 <= risk_d <= 7.0:
+                        tp_p    = round(entry_p + (risk_d * 2.0), 2) # RRR 1:2.0
+                        rec_lot = calculate_recommended_lot(entry_p, sl_p)
+                        reason  = "📈 توافق فريم H4 و H1 الصاعد + إعادة اختبار منطقة الطلب الرئيسية"
+                        
+                        generated_orders.append({
+                            "type_raw": raw_type, "type_ar": ORDER_TRANSLATIONS[raw_type],
+                            "entry": entry_p, "tp": tp_p, "sl": sl_p, "lot": rec_lot,
+                            "strategy_tag": "intraday", "strategy_name_ar": "📈 الاتجاه اليومي الفائق (Trend VIP)",
+                            "reason": reason
+                        })
 
-        # 3. ارتداد RSI من مناطق التشبع البيعي أو إعادة تجميع
-        if 35 <= rsi_m15 <= 52:
-            confluence_score += 1
-            details.append("✅ مؤشر RSI يظهر إعادة تجميع بعد تصحيح صحي")
+        elif h4_bearish and h1_bearish:
+            if spot_price >= (ema50_m15 - (atr_m15 * 0.4)) and (50 <= rsi_m15 <= 65):
+                raw_type = "Market Sell"
+                entry_p = spot_price
+                if not is_near_duplicate("intraday", raw_type, entry_p):
+                    sl_p    = round(max(highs_m15[-5:]) + (atr_m15 * 0.5), 2)
+                    risk_d  = abs(sl_p - entry_p)
+                    if 2.5 <= risk_d <= 7.0:
+                        tp_p    = round(entry_p - (risk_d * 2.0), 2)
+                        rec_lot = calculate_recommended_lot(entry_p, sl_p)
+                        reason  = "📈 توافق فريم H4 و H1 الهابط + كسرة هيكل مع إعادة اختبار العرض"
+                        
+                        generated_orders.append({
+                            "type_raw": raw_type, "type_ar": ORDER_TRANSLATIONS[raw_type],
+                            "entry": entry_p, "tp": tp_p, "sl": sl_p, "lot": rec_lot,
+                            "strategy_tag": "intraday", "strategy_name_ar": "📈 الاتجاه اليومي الفائق (Trend VIP)",
+                            "reason": reason
+                        })
 
-        # 4. شمعة انعكاسية صاعدة على M15
-        if closes_m15[-1] > closes_m15[-2] and (closes_m15[-1] - lows_m15[-1]) > (highs_m15[-1] - closes_m15[-1]):
-            confluence_score += 1
-            details.append("✅ ظهور شمعة انعكاسية صاعدة (Bullish Rejection)")
-
-        # 5. وجود سيولة جلسة نيويورك / لندن
-        confluence_score += 1
-        details.append("✅ سيولة الجلسة الرئيسية متوفرة")
-
-        # شرط القبول الصارم: 4 درجات من 5 على الأقل
-        if confluence_score >= 4 and (time.time() - last_sent_signal_time) > 10800: # تجنب تكرار الصفقات لأقل من 3 ساعات
-            entry_p = spot_price
-            sl_p    = round(last_pivot_low - (atr_m15 * 0.5), 2)
-            risk_dist = abs(entry_p - sl_p)
-            
-            # التأكد من أن الستوب غير متضخم وغير ضيق جداً (بين 2.5$ و 7.5$)
-            if 2.5 <= risk_dist <= 7.5:
-                tp_p    = round(entry_p + (risk_dist * 2.0), 2) # نسبة عائد 1:2
-                rec_lot = calculate_recommended_lot(entry_p, sl_p)
-                
-                generated_orders.append({
-                    "type_raw": "Market Buy",
-                    "type_ar": ORDER_TRANSLATIONS["Market Buy"],
-                    "entry": entry_p, "tp": tp_p, "sl": sl_p, "lot": rec_lot,
-                    "score": f"{confluence_score}/5",
-                    "reason": "\n".join(details)
-                })
-
-    # ==========================================
-    # تقييم نقاط القوة والتوافق (SELL SCENARIO)
-    # ==========================================
-    elif h4_bearish and h1_bearish:
-        confluence_score = 0
-        details = []
-
-        # 1. توافق الفريم الكبيرة
-        confluence_score += 1
-        details.append("✅ اتجاه H4 و H1 هابط بقوة (أسفل EMA200)")
-
-        # 2. التصحيح لمنطقة العرض
-        if spot_price >= (ema50_m15 - (atr_m15 * 0.5)):
-            confluence_score += 1
-            details.append("✅ السعر في منطقة إعادة اختبار للمقاومة (Pullback to Supply)")
-
-        # 3. مؤشر RSI
-        if 48 <= rsi_m15 <= 65:
-            confluence_score += 1
-            details.append("✅ مؤشر RSI يظهر وصول التصحيح لذروته الهابطة")
-
-        # 4. شمعة انعكاسية هابطة
-        if closes_m15[-1] < closes_m15[-2] and (highs_m15[-1] - closes_m15[-1]) > (closes_m15[-1] - lows_m15[-1]):
-            confluence_score += 1
-            details.append("✅ ظهور شمعة انعكاسية هابطة (Bearish Rejection)")
-
-        # 5. سيولة الجلسة
-        confluence_score += 1
-        details.append("✅ سيولة الجلسة الرئيسية متوفرة")
-
-        if confluence_score >= 4 and (time.time() - last_sent_signal_time) > 10800:
-            entry_p = spot_price
-            sl_p    = round(last_pivot_high + (atr_m15 * 0.5), 2)
-            risk_dist = abs(sl_p - entry_p)
-            
-            if 2.5 <= risk_dist <= 7.5:
-                tp_p    = round(entry_p - (risk_dist * 2.0), 2)
-                rec_lot = calculate_recommended_lot(entry_p, sl_p)
-                
-                generated_orders.append({
-                    "type_raw": "Market Sell",
-                    "type_ar": ORDER_TRANSLATIONS["Market Sell"],
-                    "entry": entry_p, "tp": tp_p, "sl": sl_p, "lot": rec_lot,
-                    "score": f"{confluence_score}/5",
-                    "reason": "\n".join(details)
-                })
-
-    status_str = f"مسح عالي الجودة - {session_msg}"
-    return generated_orders, status_str, spot_price, rsi_m15
+    return generated_orders, f"مسح متكامل - {session_msg}", spot_price, rsi_m15
 
 # ================= ================= =================
-# 6. واجهة الإعدادات والتلجرام
+# 6. واجهة الإعدادات
 # ================= ================= =================
 def build_settings_text():
     keys_count = len(get_all_api_keys())
     news_status = "مفعل ✅" if news_filter_active else "معطل ❌"
     
     return (
-        f"👑 **محرك إشارات الذهب عالية التوافق (High-Confluence VIP Engine):**\n\n"
-        f"🌐 **نطاق التداول:** 🟡 `الذهب (XAU/USD) فقط`\n"
-        f"🎯 **الاستراتيجية:** `متابعة الاتجاه الفائق (H4 + H1 Trend Matching)`\n"
-        f"📐 **نظام التصفية:** `5/5 Confluence Score Filter`\n"
+        f"⚙️ **تقرير وإعدادات البوت الذكية (Dual VIP):**\n\n"
+        f"🌐 **نطاق الأصول:** 🟡 `الذهب (XAU/USD) فقط`\n"
+        f"🎯 **نمط التداول:** `{STRATEGY_NAMES.get(active_strategy, '🚀 الاستراتيجيتين معاً')}`\n"
         f"⏰ **فلتر الجلسات:** `لندن ونيويورك فقط (07:00 - 17:00 UTC)`\n"
         f"🟢 **فلتر الأخبار:** `{news_status}`\n"
-        f"⚖️ **نسبة المخاطرة إلى العائد (RRR):** `1 : 2.0 كحد أدنى`\n"
         f"🎯 **نسبة المخاطرة:** `{risk_percentage}% لكل صفقة`\n"
         f"💰 **رصيد الحساب:** `{account_balance_cents} سنت`\n"
         f"🔑 **مفاتيح API الشغالة:** `{keys_count}`"
     )
 
 def build_settings_keyboard():
+    strat_text = f"🎯 نمط التداول: {STRATEGY_NAMES.get(active_strategy, '🚀 الاستراتيجيتين معاً')}"
     news_text = "🟢 فلتر الأخبار: مفعل" if news_filter_active else "🔴 فلتر الأخبار: معطل"
+    
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("👑 نمط التداول: عالية المصداقية (VIP)", callback_data="none")],
+        [InlineKeyboardButton("🌐 النطاق: 🟡 الذهب فقط", callback_data="none")],
+        [InlineKeyboardButton(strat_text, callback_data="toggle_strategy")],
         [InlineKeyboardButton(news_text, callback_data="toggle_news")],
         [InlineKeyboardButton(f"🎯 نسبة المخاطرة: {risk_percentage}%", callback_data="none")],
         [InlineKeyboardButton(f"💰 الرصيد: {account_balance_cents} سنت", callback_data="none")]
     ])
 
 # ================= ================= =================
-# 7. الحلقة الرئيسية للمسح الخلفي
+# 7. الحلقة الرئيسية والمهام
 # ================= ================= =================
 async def market_scanner_loop(bot: Bot, chat_id: str):
-    global last_scanned_candle, vip_id_counter, last_sent_signal_time
+    global last_scanned_candle, scalp_id_counter, trend_id_counter, recent_sent_signals
     while True:
         try:
             now = datetime.utcnow()
-            # المسح عند إغلاق كل شمعة 15 دقيقة
             if now.minute % 15 == 0:
                 candle_id = now.strftime("%Y-%m-%d %H:%M")
                 if candle_id != last_scanned_candle:
                     last_scanned_candle = candle_id
                     
-                    orders, status, spot_price, rsi = await analyze_gold_market_high_confluence()
+                    orders, status, spot_price, rsi = await analyze_gold_market_dual_engine()
                     
                     for order in orders:
-                        vip_id_counter += 1
-                        order_id = f"#GOLD-VIP-{vip_id_counter}"
-                        last_sent_signal_time = time.time()
+                        if order["strategy_tag"] == "scalping":
+                            scalp_id_counter += 1
+                            order_id = f"#SCALP-VIP-{scalp_id_counter}"
+                        else:
+                            trend_id_counter += 1
+                            order_id = f"#TREND-VIP-{trend_id_counter}"
 
                         emoji = "🔴" if "Sell" in order['type_raw'] else "🟢"
                         msg = (
-                            f"🔥 **إشارة صفقة عالية الجودة [GOLD VIP]**\n"
+                            f"🤖 **إشارة تداول ذكية [الذهب XAU/USD]**\n"
                             f"🆔 **المرجع:** `{order_id}`\n"
-                            f"⏱ **التوقيت:** {now.strftime('%H:%M')} UTC\n"
-                            f"🎯 **درجة التوافق (Confluence):** `{order['score']}`\n\n"
+                            f"🎯 **الاستراتيجية:** `{order['strategy_name_ar']}`\n"
+                            f"⏱ **التوقيت:** {now.strftime('%H:%M')} UTC\n\n"
                             f"📊 **السعر الحالي:** `{spot_price}` | **RSI:** `{rsi}`\n"
                             f"{emoji} **نوع الأمر:** `{order['type_ar']}`\n"
                             f"📍 **نقطة الدخول:** `{order['entry']}`\n"
-                            f"🟢 **أخذ الربح (TP - 1:2):** `{order['tp']}`\n"
-                            f"🔴 **وقف الخسارة الهيكلي (SL):** `{order['sl']}`\n\n"
-                            f"💰 **حجم العقد الموصى به:** `{order['lot']}`\n\n"
-                            f"💡 **أسباب ودواعي الدخول:**\n_{order['reason']}_"
+                            f"🟢 **أخذ الربح (TP):** `{order['tp']}`\n"
+                            f"🔴 **وقف الخسارة (SL):** `{order['sl']}`\n\n"
+                            f"💰 **حجم العقد (Lot):** `{order['lot']}`\n"
+                            f"💡 **السبب والتحليل:** _{order['reason']}_"
                         )
                         await bot.send_message(chat_id=chat_id, text=msg, parse_mode="Markdown")
-                        
+
+                        # حفظ الصفقة في السجل لمنع التكرار
+                        recent_sent_signals[order["strategy_tag"]] = {
+                            "entry": order["entry"],
+                            "type": order["type_raw"],
+                            "time": time.time()
+                        }
+
                     await asyncio.sleep(1)
         except Exception as e:
             print(f"Scanner Loop Error: {e}")
@@ -426,36 +412,43 @@ async def handle_settings_command(update: Update, context: ContextTypes.DEFAULT_
     await update.message.reply_text(build_settings_text(), reply_markup=build_settings_keyboard(), parse_mode="Markdown")
 
 async def handle_manual_scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("🔍 **جاري المسح العميق والتوافق المتعدد للذهب (XAU/USD)...**", parse_mode="Markdown")
-    orders, status, spot_price, rsi = await analyze_gold_market_high_confluence()
+    await update.message.reply_text("🔍 **جاري فحص سوق الذهب بالمحرك المزدوج الذكي...**", parse_mode="Markdown")
+    orders, status, spot_price, rsi = await analyze_gold_market_dual_engine()
     
     report = (
-        f"🏆 **تقرير الذهب عالي الجودة (XAU/USD):**\n\n"
+        f"🏆 **تقرير الذهب الفوري (XAU/USD):**\n\n"
         f"💵 **السعر الحالي:** `{spot_price}`\n"
         f"📈 **RSI (15m):** `{rsi}`\n"
-        f"⚙️ **حالة السوق:** `{status}`\n"
+        f"⚙️ **الحالة:** `{status}`\n"
     )
     if orders:
         for ord_info in orders:
             report += (
-                f"\n🔥 **صفقة مكتملة الشروط والقوة ({ord_info['score']}):**\n"
+                f"\n🎯 **صفقة مكتشفة ({ord_info['strategy_name_ar']}):**\n"
                 f"• **الأمر:** `{ord_info['type_ar']}`\n"
                 f"• **الدخول:** `{ord_info['entry']}`\n"
                 f"• **TP:** `{ord_info['tp']}` | **SL:** `{ord_info['sl']}`\n"
-                f"• **اللوت:** `{ord_info['lot']}`\n\n"
-                f"**الأسباب:**\n_{ord_info['reason']}_"
+                f"• **اللوت:** `{ord_info['lot']}`\n"
+                f"• **السبب:** _{ord_info['reason']}_\n"
             )
     else:
-        report += "\n✋ **لا توجد صفقة مطابقة لجميع شروط القوة والتوافق العالي حالياً.**"
+        report += "\n✋ **لا توجد صفقة مستوفية للشروط الذكية القوية في الوقت الحالي.**"
         
     await update.message.reply_text(report, parse_mode="Markdown")
 
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global news_filter_active
+    global active_strategy, news_filter_active
     query = update.callback_query
     await query.answer()
     
-    if query.data == "toggle_news":
+    if query.data == "toggle_strategy":
+        if active_strategy == "both":
+            active_strategy = "scalping"
+        elif active_strategy == "scalping":
+            active_strategy = "intraday"
+        else:
+            active_strategy = "both"
+    elif query.data == "toggle_news":
         news_filter_active = not news_filter_active
         
     try:
