@@ -210,7 +210,7 @@ async def analyze_gold_market_dual_engine():
     if not res_h4 or "values" not in res_h4 or not res_h1 or "values" not in res_h1 or not res_m15 or "values" not in res_m15:
         return [], "خطأ في الاتصال بالبيانات", 0, 0
 
-    # fريم H4
+    # فريم H4
     vals_h4 = res_h4["values"][::-1]
     closes_h4 = [float(x["close"]) for x in vals_h4]
     ema200_h4 = calculate_ema(closes_h4, 200)[-1] if len(closes_h4) >= 200 else calculate_ema(closes_h4, 50)[-1]
@@ -240,21 +240,31 @@ async def analyze_gold_market_dual_engine():
     generated_orders = []
 
     # ---------------------------------------------------------
-    # ⚡️ المحرك الأول: السكالبينج الخاطف الذكي (Scalp VIP)
+    # ⚡️ المحرك الأول: السكالبينج الخاطف الذكي (Scalp VIP) - المحدث
     # ---------------------------------------------------------
     if active_strategy in ["scalping", "both"]:
-        # السكالبينج الشرائي: يتطلب اتفاق اتجاه H1 الصاعد + ارتداد خاطف M15
+        # السكالبينج الشرائي مع مراعاة مسافة التنفس وذيل الرفض
         if h1_bullish and (closes_m15[-1] > closes_m15[-2]):
-            if (ema20_m15 > ema50_m15) and (38 <= rsi_m15 <= 55) and abs(spot_price - ema20_m15) <= (atr_m15 * 0.6):
+            if (ema20_m15 > ema50_m15) and (38 <= rsi_m15 <= 55) and abs(spot_price - ema20_m15) <= (atr_m15 * 0.8):
                 raw_type = "Market Buy"
                 entry_p = spot_price
                 if not is_near_duplicate("scalping", raw_type, entry_p):
-                    sl_p    = round(min(lows_m15[-3:]) - (atr_m15 * 0.4), 2)
-                    risk_d  = abs(entry_p - sl_p)
-                    if 1.5 <= risk_d <= 4.0: # ستوب محكم للسكالبينج
-                        tp_p    = round(entry_p + (risk_d * 1.5), 2) # RRR 1:1.5
+                    # 1. البحث عن أدنى ذيل في آخر 5 شمعات
+                    lowest_wick = min(lows_m15[-5:])
+                    
+                    # 2. إبعاد الستوب أسفل الذيل بهامش أمان يعتمد على ATR
+                    sl_p = round(lowest_wick - (atr_m15 * 0.8), 2)
+                    
+                    # 3. التأكد من أن مسافة الستوب لا تقل عن 2.80$ لمقاومة ضوضاء الذهب
+                    risk_d = abs(entry_p - sl_p)
+                    if risk_d < 2.80:
+                        sl_p = round(entry_p - 2.80, 2)
+                        risk_d = 2.80
+
+                    if 2.80 <= risk_d <= 5.00:
+                        tp_p = round(entry_p + (risk_d * 1.5), 2) # RRR 1:1.5
                         rec_lot = calculate_recommended_lot(entry_p, sl_p)
-                        reason  = "⚡️ ارتداد خاطف مع اتجاه H1 الصاعد + اعادة تجميع RSI"
+                        reason = "⚡️ رفض قوي للهبوط (ذيل شمعة) مع اتجاه H1 الصاعد + ستوب ممتد للضوضاء"
                         
                         generated_orders.append({
                             "type_raw": raw_type, "type_ar": ORDER_TRANSLATIONS[raw_type],
@@ -263,18 +273,28 @@ async def analyze_gold_market_dual_engine():
                             "reason": reason
                         })
 
-        # السكالبينج البيعي: يتطلب اتفاق اتجاه H1 الهابط + رفض خاطف M15
+        # السكالبينج البيعي مع مراعاة مسافة التنفس وذيل الرفض
         elif h1_bearish and (closes_m15[-1] < closes_m15[-2]):
-            if (ema20_m15 < ema50_m15) and (45 <= rsi_m15 <= 62) and abs(spot_price - ema20_m15) <= (atr_m15 * 0.6):
+            if (ema20_m15 < ema50_m15) and (45 <= rsi_m15 <= 62) and abs(spot_price - ema20_m15) <= (atr_m15 * 0.8):
                 raw_type = "Market Sell"
                 entry_p = spot_price
                 if not is_near_duplicate("scalping", raw_type, entry_p):
-                    sl_p    = round(max(highs_m15[-3:]) + (atr_m15 * 0.4), 2)
-                    risk_d  = abs(sl_p - entry_p)
-                    if 1.5 <= risk_d <= 4.0:
-                        tp_p    = round(entry_p - (risk_d * 1.5), 2)
+                    # 1. البحث عن أعلى ذيل في آخر 5 شمعات
+                    highest_wick = max(highs_m15[-5:])
+                    
+                    # 2. إبعاد الستوب أعلى الذيل بهامش أمان يعتمد على ATR
+                    sl_p = round(highest_wick + (atr_m15 * 0.8), 2)
+                    
+                    # 3. التأكد من أن مسافة الستوب لا تقل عن 2.80$ لمقاومة ضوضاء الذهب
+                    risk_d = abs(sl_p - entry_p)
+                    if risk_d < 2.80:
+                        sl_p = round(entry_p + 2.80, 2)
+                        risk_d = 2.80
+
+                    if 2.80 <= risk_d <= 5.00:
+                        tp_p = round(entry_p - (risk_d * 1.5), 2)
                         rec_lot = calculate_recommended_lot(entry_p, sl_p)
-                        reason  = "⚡️ رفض من المقاومة مع اتجاه H1 الهابط + ضغط بائعي خاطف"
+                        reason = "⚡️ رفض قوي للصعود (ذيل علوي) مع اتجاه H1 الهابط + ستوب ممتد للضوضاء"
                         
                         generated_orders.append({
                             "type_raw": raw_type, "type_ar": ORDER_TRANSLATIONS[raw_type],
@@ -294,7 +314,7 @@ async def analyze_gold_market_dual_engine():
                 if not is_near_duplicate("intraday", raw_type, entry_p):
                     sl_p    = round(min(lows_m15[-5:]) - (atr_m15 * 0.5), 2)
                     risk_d  = abs(entry_p - sl_p)
-                    if 2.5 <= risk_d <= 7.0:
+                    if 2.80 <= risk_d <= 7.00:
                         tp_p    = round(entry_p + (risk_d * 2.0), 2) # RRR 1:2.0
                         rec_lot = calculate_recommended_lot(entry_p, sl_p)
                         reason  = "📈 توافق فريم H4 و H1 الصاعد + إعادة اختبار منطقة الطلب الرئيسية"
@@ -313,7 +333,7 @@ async def analyze_gold_market_dual_engine():
                 if not is_near_duplicate("intraday", raw_type, entry_p):
                     sl_p    = round(max(highs_m15[-5:]) + (atr_m15 * 0.5), 2)
                     risk_d  = abs(sl_p - entry_p)
-                    if 2.5 <= risk_d <= 7.0:
+                    if 2.80 <= risk_d <= 7.00:
                         tp_p    = round(entry_p - (risk_d * 2.0), 2)
                         rec_lot = calculate_recommended_lot(entry_p, sl_p)
                         reason  = "📈 توافق فريم H4 و H1 الهابط + كسرة هيكل مع إعادة اختبار العرض"
