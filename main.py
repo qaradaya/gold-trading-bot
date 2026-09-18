@@ -33,7 +33,7 @@ class BotConfig:
         self.risk_percentage = 1.0
         self.use_dynamic_lot = True
         self.fixed_lot = 0.10
-        self.zigzag_threshold = 0.30       # عتبة ZigZag بالنسبة المئوية
+        self.zigzag_threshold = 0.30
         self.awaiting_balance_input = False
 
 config = BotConfig()
@@ -55,16 +55,15 @@ def get_symbol_precision(symbol):
         return 3
     if any(x in s for x in ("XAU", "BTC", "ETH")):
         return 2
-    return 5  # Forex majors: EUR/USD = 1.08505
+    return 5
 
 def get_cost_per_point(symbol):
-    """قيمة الدولار لكل 1.0 حركة سعرية في عقد واحد قياسي."""
     s = symbol.upper()
     if "XAU" in s:
-        return 100.0        # 1 lot = 100 oz → $1 move = $100
+        return 100.0
     if any(x in s for x in ("BTC", "ETH")):
-        return 1.0          # 1 lot = 1 BTC → $1 move = $1
-    return 100000.0         # Forex standard lot
+        return 1.0
+    return 100000.0
 
 def get_all_api_keys():
     keys = []
@@ -115,15 +114,6 @@ async def fetch_twelve_data(endpoint_name, extra_params=None):
 def zigzag_pivots(highs, lows, precision, threshold_pct=0.3, skip_last=2):
     """
     ZigZag Pivots - نقاط انعكاس ثابتة (لا تعيد الرسم للشمعات الماضية).
-
-    Args:
-        highs, lows: مصفوفات الأسعار (الأقدم أولاً)
-        precision: عدد الخانات العشرية
-        threshold_pct: نسبة الانعكاس الدنيا لتأكيد القمة/القاع
-        skip_last: عدد الشمعات الأخيرة المُتجاهَلة (تجنب repainting)
-
-    Returns:
-        (pivot_highs, pivot_lows)
     """
     n = len(highs) - skip_last
     if n < 3:
@@ -159,7 +149,7 @@ def zigzag_pivots(highs, lows, precision, threshold_pct=0.3, skip_last=2):
                 pivot_highs.append(round(running_high, precision))
                 direction = 'down'
                 running_low = l
-        else:  # down
+        else:
             if l < running_low:
                 running_low = l
             if running_low > 0 and (h - running_low) / running_low * 100 >= threshold_pct:
@@ -226,7 +216,6 @@ async def run_pivot_scan():
     if spot_price is None:
         return None, "⚠️ تعذر الاتصال بمصدر البيانات، حاول لاحقاً."
 
-    # دمج المستويات المتقاربة (خلال 0.05%)
     def dedupe(levels):
         if not levels:
             return []
@@ -326,12 +315,53 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "👋 <b>مرحباً بك في بوت ZigZag Semi-Auto</b>\n\n"
         "يحدد البوت القمم والقيعان الثابتة عبر ZigZag ثم يعطيك صفقتين معلقتين "
         "(Buy Limit + Sell Limit) مع هدف وستوب لكل منهما.\n\n"
+
         "📌 <b>الأوامر:</b>\n"
         "/settings — لوحة التحكم\n"
         "/scan — تحليل وتوليد الصفقات\n"
         "/balance &lt;value&gt; — تعديل الرصيد\n\n"
-        "💡 <b>آلية العمل:</b> بعد استلام الإشارة، ضع الأمرين المعلقين، "
-        "وعند تفعيل أحدهما قم بإلغاء الآخر يدوياً وتابع الصفقة حتى الهدف أو الستوب.",
+
+        "━━━━━━━━━━━━━━━━━━━\n"
+        "📐 <b>شرح حساسية ZigZag:</b>\n"
+        "━━━━━━━━━━━━━━━━━━━\n"
+        "الحساسية تحدد <b>الحد الأدنى لنسبة الانعكاس</b> ليُعتبر السعر "
+        "قمة أو قاعاً حقيقياً. كلما زادت النسبة، قلّت المستويات وازدادت قوتها.\n\n"
+
+        "🟢 <b>0.15% — حساس جداً</b>\n"
+        "• يلتقط تحركات صغيرة\n"
+        "• مناسب للفريمات الصغيرة (M15, M30)\n"
+        "• مستويات كثيرة لكن بعضها ضعيف\n"
+        "• ⚠️ خطر ضرب الستوب بسهولة\n\n"
+
+        "🟡 <b>0.30% — متوازن (الافتراضي)</b>\n"
+        "• توازن بين الكمية والجودة\n"
+        "• مناسب لـ H1 و H4\n"
+        "• الأفضل لمعظم الحالات\n\n"
+
+        "🟠 <b>0.50% — متحفظ</b>\n"
+        "• مستويات قوية فقط\n"
+        "• مناسب لـ H4 و D1\n"
+        "• صفقات أقل لكن أدق\n\n"
+
+        "🔴 <b>1.00% — صارم جداً</b>\n"
+        "• القمم والقيعان الكبرى فقط\n"
+        "• مناسب لـ D1 فقط\n"
+        "• قد يعطي مستوى واحداً أو لا شيء\n\n"
+
+        "━━━━━━━━━━━━━━━━━━━\n"
+        "💡 <b>نصيحة:</b>\n"
+        "• فريمات صغيرة (M15/M30) → استخدم <code>0.15%</code> أو <code>0.30%</code>\n"
+        "• فريمات متوسطة (H1/H4) → استخدم <code>0.30%</code> أو <code>0.50%</code>\n"
+        "• فريمات كبيرة (D1) → استخدم <code>0.50%</code> أو <code>1.00%</code>\n\n"
+
+        "━━━━━━━━━━━━━━━━━━━\n"
+        "⚠️ <b>آلية العمل:</b>\n"
+        "1️⃣ اضغط <code>/scan</code> لاستلام الإشارة\n"
+        "2️⃣ ضع كلا الأمرين المعلقين (Buy Limit + Sell Limit)\n"
+        "3️⃣ عند تفعيل أحدهما، ألغِ الآخر <b>فوراً</b> يدوياً\n"
+        "4️⃣ تابع الصفقة حتى ضرب الهدف أو الستوب\n\n"
+
+        "🎯 ابدأ الآن بـ <code>/settings</code> لضبط الإعدادات.",
         parse_mode="HTML"
     )
 
