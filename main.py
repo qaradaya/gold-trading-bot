@@ -15,24 +15,24 @@ app = Flask(__name__)
 @app.route('/')
 @app.route('/ping')
 def home():
-    return "Semi-Auto Pivot Trading Bot is Running!"
+    return "Semi-Auto Multi-Precision Pivot Bot is Active!"
 
 def run_web_server():
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
 
 # ================= ================= =================
-# 2. إعدادات البوت وتخزين البيانات
+# 2. إعدادات البوت والتهيئة العامة
 # ================= ================= =================
 class BotConfig:
     def __init__(self):
         self.symbol = "XAU/USD"
         self.enabled_timeframes = {"D1": True, "H4": True, "H1": True, "M30": False, "M15": False, "M5": False, "M1": False}
-        self.custom_balance = 1000.0       # الرصيد المخصص (يمكن تغييره يدوياً)
-        self.risk_percentage = 1.0         # نسبة المخاطرة %
-        self.use_dynamic_lot = True        # True = حساب اللوت, False = لوت ثابت
-        self.fixed_lot = 0.10              # اللوت الثابت
-        self.awaiting_balance_input = False # حالة انتظار كتابة الرصيد
+        self.custom_balance = 1000.0        # الرصيد المخصص
+        self.risk_percentage = 1.0          # نسبة المخاطرة %
+        self.use_dynamic_lot = True         # حساب اللوت تلقائياً
+        self.fixed_lot = 0.10               # اللوت الثابت
+        self.awaiting_balance_input = False  # حالة انتظار إدخال الرصيد النصي
 
 config = BotConfig()
 current_key_idx = 0
@@ -41,6 +41,16 @@ TF_MAP = {
     "D1": "1day", "H4": "4h", "H1": "1h",
     "M30": "30min", "M15": "15min", "M5": "5min", "M1": "1min"
 }
+
+def get_symbol_precision(symbol):
+    """تحديد الخانات العشرية الدقيقة بناءً على أداة التداول"""
+    symbol_upper = symbol.upper()
+    if "XAU" in symbol_upper or "BTC" in symbol_upper:
+        return 2
+    elif "JPY" in symbol_upper:
+        return 3
+    else:
+        return 4  # العملات الرئيسية مثل EUR/USD, GBP/USD
 
 def get_all_api_keys():
     keys = []
@@ -51,7 +61,7 @@ def get_all_api_keys():
     return keys
 
 # ================= ================= =================
-# 3. خوارزمية جلب البيانات وتحديد القمم والقيعان (Pivot High/Low)
+# 3. جلب البيانات واستخراج القمم والقيعان الحقيقية
 # ================= ================= =================
 def fetch_url(url, params=None, timeout=6):
     try:
@@ -87,25 +97,23 @@ async def fetch_twelve_data(endpoint_name, extra_params=None):
         return res
     return {"status_code": 429}
 
-def extract_chart_pivots(highs, lows):
-    """
-    استخراج قمم وقيعان الشارت المرتكزة الحقيقية (Real Chart Swing Highs & Lows)
-    """
+def extract_chart_pivots(highs, lows, precision):
+    """استخراج قمم وقيعان الشارت المرتكزة الحقيقية بدقة الخانات العشرية للزوج"""
     pivot_highs = []
     pivot_lows = []
     n = len(highs)
     if n < 5: return pivot_highs, pivot_lows
 
-    # البحث عن الارتكازات المباشرة (القمة أعلى من شمعتين قبلها وشمعتين بعدها)
     for i in range(2, n - 2):
         if highs[i] > highs[i-1] and highs[i] > highs[i-2] and highs[i] > highs[i+1] and highs[i] > highs[i+2]:
-            pivot_highs.append(round(highs[i], 2))
+            pivot_highs.append(round(highs[i], precision))
         if lows[i] < lows[i-1] and lows[i] < lows[i-2] and lows[i] < lows[i+1] and lows[i] < lows[i+2]:
-            pivot_lows.append(round(lows[i], 2))
+            pivot_lows.append(round(lows[i], precision))
 
     return pivot_highs, pivot_lows
 
-def calculate_recommended_lot(entry_price, sl_price):
+def calculate_recommended_lot(entry_price, sl_price, symbol):
+    """حساب اللوت الدقيق بناءً على قيمة النقطة والأداة المالية"""
     if not config.use_dynamic_lot:
         return config.fixed_lot
     try:
@@ -113,19 +121,27 @@ def calculate_recommended_lot(entry_price, sl_price):
         price_distance = abs(entry_price - sl_price)
         if price_distance <= 0: return config.fixed_lot
         
-        cost_per_point = 100.0 if "XAU" in config.symbol else 100000.0
+        symbol_upper = symbol.upper()
+        if "XAU" in symbol_upper:
+            cost_per_point = 100.0
+        elif "BTC" in symbol_upper:
+            cost_per_point = 1.0
+        else:
+            cost_per_point = 100000.0  # عقد قياسي للعملات (Standard Forex Lot)
+            
         raw_lot = risk_amount / (price_distance * cost_per_point)
         return max(0.01, round(raw_lot, 2))
     except Exception:
         return config.fixed_lot
 
 # ================= ================= =================
-# 4. محرك تحليل المستويات الدقيق
+# 4. محرك تحليل المستويات الدقيق (Pivot Scan Engine)
 # ================= ================= =================
 async def run_pivot_scan():
     all_pivots_high = []
     all_pivots_low = []
     spot_price = None
+    precision = get_symbol_precision(config.symbol)
 
     for tf_code, is_enabled in config.enabled_timeframes.items():
         if not is_enabled: continue
@@ -144,49 +160,47 @@ async def run_pivot_scan():
             closes = [float(x["close"]) for x in vals]
             
             if spot_price is None:
-                spot_price = round(closes[-1], 2)
+                spot_price = round(closes[-1], precision)
                 
-            p_highs, p_lows = extract_chart_pivots(highs, lows)
+            p_highs, p_lows = extract_chart_pivots(highs, lows, precision)
             all_pivots_high.extend(p_highs)
             all_pivots_low.extend(p_lows)
 
     if spot_price is None:
-        return None, "⚠️ تعذر اتصال البوت بمصدر البيانات، يرجى المحاولة لاحقاً."
+        return None, "⚠️ تعذر الاتصال بمصدر البيانات، يرجى المحاولة بعد لحظات."
 
-    # تصفية وتصنيف القيعان (الدعوم) والقمم (المقاومات) المباشرة أسفل وأعلى السعر
+    # تصفية وتصنيف القيعان والقمم المباشرة حول السعر الحالي
     supports = sorted(list(set([p for p in all_pivots_low if p < spot_price])))
     resistances = sorted(list(set([p for p in all_pivots_high if p > spot_price])))
 
-    # التحقق المباشر: يجب توفر قاعين حقيقيين وقمة حقيقية على الأقل
     if len(supports) < 2:
-        return None, f"⚠️ لم يتم العثور على قيعان تداول سابقة كافية أسفل السعر الحالي ({spot_price}). يرجى تفعيل فريمات إضافية."
+        return None, f"⚠️ لم يتم العثور على قيعان سابقة كافية أسفل السعر الحالي ({spot_price}). يرجى تفعيل فريمات إضافية."
     
     if len(resistances) < 2:
-        return None, f"⚠️ لم يتم العثور على قمم تداول سابقة كافية أعلى السعر الحالي ({spot_price}). يرجى تفعيل فريمات إضافية."
+        return None, f"⚠️ لم يتم العثور على قمم سابقة كافية أعلى السعر الحالي ({spot_price}). يرجى تفعيل فريمات إضافية."
 
-    # نقاط الشراء (الدخول = القاع الأول، الستوب = القاع الثاني الحقيقي)
     buy_entry = supports[-1]
     buy_sl    = supports[-2]
 
-    # نقاط البيع (الدخول = القمة الأولى، الستوب = القمة الثانية الحقيقية)
     sell_entry = resistances[0]
     sell_sl    = resistances[1]
 
     buy_tp  = sell_entry
     sell_tp = buy_entry
 
-    buy_lot  = calculate_recommended_lot(buy_entry, buy_sl)
-    sell_lot = calculate_recommended_lot(sell_entry, sell_sl)
+    buy_lot  = calculate_recommended_lot(buy_entry, buy_sl, config.symbol)
+    sell_lot = calculate_recommended_lot(sell_entry, sell_sl, config.symbol)
 
     return {
         "spot": spot_price,
         "symbol": config.symbol,
+        "precision": precision,
         "buy": {"entry": buy_entry, "tp": buy_tp, "sl": buy_sl, "lot": buy_lot},
         "sell": {"entry": sell_entry, "tp": sell_tp, "sl": sell_sl, "lot": sell_lot}
     }, "OK"
 
 # ================= ================= =================
-# 5. الواجهة البرمجية والأوامر
+# 5. لوحة التحكم والواجهة التفاعلية
 # ================= ================= =================
 def build_settings_text():
     tf_status = ", ".join([tf for tf, active in config.enabled_timeframes.items() if active])
@@ -198,7 +212,7 @@ def build_settings_text():
         f"⏱️ **الفريمات المفعلة:** `{tf_status}`\n"
         f"💰 **الرصيد المعتمد:** `${config.custom_balance}`\n"
         f"🎯 **طريقة حساب اللوت:** `{lot_mode_str}`\n\n"
-        f"💡 _لتغيير الرصيد لأي مبلغ مخصص، أرسل الأمر:_ `/balance 1500`"
+        f"💡 _لتعديل الرصيد، اضغط الزر أدناه أو أرسل أمر:_ `/balance 1500`"
     )
 
 def build_settings_keyboard():
@@ -219,13 +233,12 @@ def build_settings_keyboard():
     ])
 
 # ================= ================= =================
-# 6. معالجة الرسائل وإدخال الرصيد اليدوي
+# 6. معالجة الرسائل والأوامر
 # ================= ================= =================
 async def handle_settings_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(build_settings_text(), reply_markup=build_settings_keyboard(), parse_mode="Markdown")
 
 async def handle_balance_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """أمر تغيير الرصيد يدوياً بأي قيمة: /balance 1250"""
     try:
         if context.args:
             val = float(context.args[0])
@@ -235,37 +248,39 @@ async def handle_balance_command(update: Update, context: ContextTypes.DEFAULT_T
                 return
         await update.message.reply_text("⚠️ يرجى إدخال المبلغ بشكل صحيح، مثال:\n`/balance 1500`", parse_mode="Markdown")
     except ValueError:
-        await update.message.reply_text("⚠️ يرجى كتابة رقم صحيح بعد الأمر، مثال:\n`/balance 750`", parse_mode="Markdown")
+        await update.message.reply_text("⚠️ يرجى كتابة رقم صحيح، مثال:\n`/balance 750`", parse_mode="Markdown")
 
 async def handle_scan_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("🔍 **جاري البحث عن القمم والقيعان الحقيقية وتحديد الصفقات...**", parse_mode="Markdown")
+    await update.message.reply_text("🔍 **جاري تحليل القمم والقيعان وتحديد الصفقات...**", parse_mode="Markdown")
     
     res, status = await run_pivot_scan()
     if not res:
         await update.message.reply_text(status, parse_mode="Markdown")
         return
 
+    p = res["precision"]
     msg = (
         f"🔍 **نتيجة تحليل القمم والقيعان (Pivot MTF)**\n"
-        f"🪙 **الزوج:** `{res['symbol']}` | **السعر الحالي:** `{res['spot']}`\n"
+        f"🪙 **الزوج:** `{res['symbol']}` | **السعر الحالي:** `{res['spot']:.{p}f}`\n"
         f"💵 **الرصيد المعتمد:** `${config.custom_balance}`\n\n"
         f"🟢 **1. أمر شراء معلق (Buy Limit):**\n"
-        f"• **سعر الدخول:** `{res['buy']['entry']}` (قاع سابق)\n"
-        f"• **أخذ الربح (TP):** `{res['buy']['tp']}`\n"
-        f"• **وقف الخسارة (SL):** `{res['buy']['sl']}` (القاع التالي)\n"
+        f"• **سعر الدخول:** `{res['buy']['entry']:.{p}f}` (قاع سابق)\n"
+        f"• **أخذ الربح (TP):** `{res['buy']['tp']:.{p}f}`\n"
+        f"• **وقف الخسارة (SL):** `{res['buy']['sl']:.{p}f}` (القاع التالي)\n"
         f"• **حجم العقد (Lot):** `{res['buy']['lot']}`\n\n"
         f"🔴 **2. أمر بيع معلق (Sell Limit):**\n"
-        f"• **سعر الدخول:** `{res['sell']['entry']}` (قمة سابقة)\n"
-        f"• **أخذ الربح (TP):** `{res['sell']['tp']}`\n"
-        f"• **وقف الخسارة (SL):** `{res['sell']['sl']}` (القمة التالية)\n"
+        f"• **سعر الدخول:** `{res['sell']['entry']:.{p}f}` (قمة سابقة)\n"
+        f"• **أخذ الربح (TP):** `{res['sell']['tp']:.{p}f}`\n"
+        f"• **وقف الخسارة (SL):** `{res['sell']['sl']:.{p}f}` (القمة التالية)\n"
         f"• **حجم العقد (Lot):** `{res['sell']['lot']}`\n\n"
         f"⚠️ **تذكير:** عند تفعيل إحدى الصفقتين يدوياً، قم بإلغاء الأمر الثاني فوراً."
     )
     await update.message.reply_text(msg, parse_mode="Markdown")
 
 async def handle_text_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text.strip()
+    text = update.message.text.strip().lower()
     
+    # معالجة كتابة الرقم المباشر للرصيد
     if config.awaiting_balance_input:
         try:
             val = float(text)
@@ -278,7 +293,10 @@ async def handle_text_messages(update: Update, context: ContextTypes.DEFAULT_TYP
             pass
         config.awaiting_balance_input = False
 
-    if text.lower() == "scan":
+    # الاستجابة للرسائل والكلمات النصية المختلفة
+    if text in ["settings", "الاعدادات", "إعدادات", "اعدادات", "/settings"]:
+        await handle_settings_command(update, context)
+    elif text in ["scan", "/scan", "مسح", "فحص"]:
         await handle_scan_command(update, context)
 
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -311,14 +329,19 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 def main():
     token = os.environ.get("TELEGRAM_TOKEN")
-    if not token: return
+    if not token: 
+        print("❌ TELEGRAM_TOKEN غير موجو في المتغيرات البيئية.")
+        return
+        
     Thread(target=run_web_server, daemon=True).start()
     
     app_bot = Application.builder().token(token).build()
     
+    # تسجيل معالجات الأوامر والنصوص
     app_bot.add_handler(CommandHandler("settings", handle_settings_command))
     app_bot.add_handler(CommandHandler("balance", handle_balance_command))
     app_bot.add_handler(CommandHandler("scan", handle_scan_command))
+    
     app_bot.add_handler(CallbackQueryHandler(button_callback))
     app_bot.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_messages))
     
