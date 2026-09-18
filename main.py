@@ -21,6 +21,14 @@ def run_web_server():
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
 
+# ================= Constants (Safety Filters) =================
+MIN_ENTRY_DIST_PCT = 0.30   # أدنى مسافة % من السعر الحالي للدخول
+MIN_SL_DIST_PCT    = 0.30   # أدنى مسافة % بين الدخول والستوب
+MIN_RR             = 2.0    # نسبة الربح/المخاطرة الدنيا (Risk:Reward)
+MAX_LOT            = 1.00   # سقف اللوت الأقصى
+
+TF_PRIORITY = {"D1": 5, "H4": 4, "H1": 3, "M30": 2, "M15": 1, "M5": 1, "M1": 1}
+
 # ================= Bot Config =================
 class BotConfig:
     def __init__(self):
@@ -112,16 +120,13 @@ async def fetch_twelve_data(endpoint_name, extra_params=None):
 
 # ================= ZigZag Pivot Detection =================
 def zigzag_pivots(highs, lows, precision, threshold_pct=0.3, skip_last=2):
-    """
-    ZigZag Pivots - نقاط انعكاس ثابتة (لا تعيد الرسم للشمعات الماضية).
-    """
+    """نقاط انعكاس ثابتة (stable pivots) لا تعيد الرسم."""
     n = len(highs) - skip_last
     if n < 3:
         return [], []
 
     pivot_highs = []
     pivot_lows = []
-
     direction = None
     running_high = highs[0]
     running_low = lows[0]
@@ -162,24 +167,24 @@ def zigzag_pivots(highs, lows, precision, threshold_pct=0.3, skip_last=2):
 # ================= Lot Calculation =================
 def calculate_recommended_lot(entry_price, sl_price, symbol):
     if not config.use_dynamic_lot:
-        return config.fixed_lot
+        return min(config.fixed_lot, MAX_LOT)
     try:
         risk_amount = config.custom_balance * (config.risk_percentage / 100.0)
         price_distance = abs(entry_price - sl_price)
         if price_distance <= 0:
-            return config.fixed_lot
+            return min(config.fixed_lot, MAX_LOT)
         cost = get_cost_per_point(symbol)
         raw_lot = risk_amount / (price_distance * cost)
-        return max(0.01, round(raw_lot, 2))
+        return min(MAX_LOT, max(0.01, round(raw_lot, 2)))
     except Exception:
-        return config.fixed_lot
+        return min(config.fixed_lot, MAX_LOT)
 
 def get_actual_risk(lot, entry, sl, symbol):
     return lot * abs(entry - sl) * get_cost_per_point(symbol)
 
-# ================= Scan Engine =================
+# ================= Scan Engine (مع الفلاتر) =================
 async def run_pivot_scan():
-    all_highs = []
+    all_highs = []   # قائمة (price, priority, tf_code)
     all_lows = []
     spot_price = None
     precision = get_symbol_precision(config.symbol)
@@ -188,6 +193,7 @@ async def run_pivot_scan():
     if not active_tfs:
         return None, "⚠️ يجب تفعيل فريم واحد على الأقل."
 
+    # 1) جلب البيانات من كل الفريمات واستخراج القمم/القيعان
     for tf_code in active_tfs:
         td_interval = TF_MAP.get(tf_code, "15min")
         res = await fetch_twelve_data("time_series", {
@@ -210,45 +216,110 @@ async def run_pivot_scan():
                 threshold_pct=config.zigzag_threshold,
                 skip_last=2
             )
-            all_highs.extend(p_highs)
-            all_lows.extend(p_lows)
+            pri = TF_PRIORITY.get(tf_code, 1)
+            for p in p_highs:
+                all_highs.append((p, pri, tf_code))
+            for p in p_lows:
+                all_lows.append((p, pri, tf_code))
 
     if spot_price is None:
         return None, "⚠️ تعذر الاتصال بمصدر البيانات، حاول لاحقاً."
 
-    def dedupe(levels):
+    # 2) دمج المستويات المتقاربة (خلال 0.05%)
+    def merge_levels(levels):
         if not levels:
             return []
-        levels = sorted(set(levels))
-        result = [levels[0]]
-        for p in levels[1:]:
-            if abs(p - result[-1]) / result[-1] * 100 > 0.05:
-                result.append(p)
-        return result
+        levels = sorted(levels, key=lambda x: x[0])
+        merged = []
+        for p, pri, tf in levels:
+            found = False
+            for i, (mp, mpri, mtfs) in enumerate(merged):
+                if abs(p - mp) / mp * 100 <= 0.05:
+                    merged[i] = ((p + mp) / 2, max(pri, mpri), mtfs | {tf})
+                    found = True
+                    break
+            if not found:
+                merged.append((p, pri, {tf}))
+        return merged
 
-    supports = dedupe([p for p in all_lows if p < spot_price])
-    resistances = dedupe([p for p in all_highs if p > spot_price])
+    lows_merged = merge_levels(all_lows)
+    highs_merged = merge_levels(all_highs)
+
+    # 3) فلتر المسافة الدنيا من السعر الحالي
+    supports = [
+        (p, pri, tfs) for p, pri, tfs in lows_merged
+        if p < spot_price and (spot_price - p) / spot_price * 100 >= MIN_ENTRY_DIST_PCT
+    ]
+    resistances = [
+        (p, pri, tfs) for p, pri, tfs in highs_merged
+        if p > spot_price and (p - spot_price) / spot_price * 100 >= MIN_ENTRY_DIST_PCT
+    ]
+
+    # 4) ترتيب حسب القرب من السعر (الأقرب أولاً)
+    supports.sort(key=lambda x: spot_price - x[0])
+    resistances.sort(key=lambda x: x[0] - spot_price)
 
     if len(supports) < 2:
         return None, (
-            f"⚠️ لم يتم العثور على قيعان كافية أسفل السعر "
-            f"(<code>{spot_price:.{precision}f}</code>).\n"
-            f"جرّب: تفعيل فريمات إضافية، أو تقليل حساسية ZigZag."
+            f"⚠️ <b>لم يتم العثور على دعوم كافية</b>\n\n"
+            f"💵 السعر الحالي: <code>{spot_price:.{precision}f}</code>\n"
+            f"📏 الحد الأدنى للمسافة: <code>{MIN_ENTRY_DIST_PCT}%</code>\n"
+            f"🔎 عدد الدعوم المكتشفة: <code>{len(supports)}</code>\n\n"
+            f"💡 <b>الحلول:</b>\n"
+            f"• فعّل فريمات إضافية (H4, D1)\n"
+            f"• قلل حساسية ZigZag إلى <code>0.15%</code>\n"
+            f"• تحقق من الزوج المحدد"
         )
     if len(resistances) < 2:
         return None, (
-            f"⚠️ لم يتم العثور على قمم كافية أعلى السعر "
-            f"(<code>{spot_price:.{precision}f}</code>).\n"
-            f"جرّب: تفعيل فريمات إضافية، أو تقليل حساسية ZigZag."
+            f"⚠️ <b>لم يتم العثور على مقاومات كافية</b>\n\n"
+            f"💵 السعر الحالي: <code>{spot_price:.{precision}f}</code>\n"
+            f"📏 الحد الأدنى للمسافة: <code>{MIN_ENTRY_DIST_PCT}%</code>\n"
+            f"🔎 عدد المقاومات المكتشفة: <code>{len(resistances)}</code>\n\n"
+            f"💡 <b>الحلول:</b>\n"
+            f"• فعّل فريمات إضافية (H4, D1)\n"
+            f"• قلل حساسية ZigZag إلى <code>0.15%</code>\n"
+            f"• تحقق من الزوج المحدد"
         )
 
-    buy_entry = supports[-1]
-    buy_sl = supports[-2]
-    sell_entry = resistances[0]
-    sell_sl = resistances[1]
+    # 5) اختيار الدخول + الستوب مع فلتر المسافة الدنيا للستوب
+    def pick_entry_sl(levels, is_support):
+        entry = levels[0]
+        sl = None
+        for lv in levels[1:]:
+            if is_support:
+                dist_pct = (entry[0] - lv[0]) / entry[0] * 100
+            else:
+                dist_pct = (lv[0] - entry[0]) / entry[0] * 100
+            if dist_pct >= MIN_SL_DIST_PCT:
+                sl = lv
+                break
+        if sl is None:
+            # تمديد الستوب صناعياً لتلبية الحد الأدنى
+            if is_support:
+                sl_price = entry[0] * (1 - MIN_SL_DIST_PCT / 100)
+            else:
+                sl_price = entry[0] * (1 + MIN_SL_DIST_PCT / 100)
+            sl = (sl_price, 0, {"auto"})
+        return entry, sl
 
-    buy_lot = calculate_recommended_lot(buy_entry, buy_sl, config.symbol)
-    sell_lot = calculate_recommended_lot(sell_entry, sell_sl, config.symbol)
+    buy_entry, buy_sl = pick_entry_sl(supports, is_support=True)
+    sell_entry, sell_sl = pick_entry_sl(resistances, is_support=False)
+
+    buy_entry_p = round(buy_entry[0], precision)
+    buy_sl_p    = round(buy_sl[0], precision)
+    sell_entry_p = round(sell_entry[0], precision)
+    sell_sl_p    = round(sell_sl[0], precision)
+
+    # 6) TP مستقل لكل صفقة بناءً على R:R
+    buy_risk = buy_entry_p - buy_sl_p
+    sell_risk = sell_sl_p - sell_entry_p
+    buy_tp_p  = round(buy_entry_p + buy_risk * MIN_RR, precision)
+    sell_tp_p = round(sell_entry_p - sell_risk * MIN_RR, precision)
+
+    # 7) اللوت مع سقف أقصى
+    buy_lot  = calculate_recommended_lot(buy_entry_p, buy_sl_p, config.symbol)
+    sell_lot = calculate_recommended_lot(sell_entry_p, sell_sl_p, config.symbol)
 
     return {
         "spot": spot_price,
@@ -256,18 +327,20 @@ async def run_pivot_scan():
         "precision": precision,
         "tfs": active_tfs,
         "buy": {
-            "entry": buy_entry,
-            "tp": sell_entry,
-            "sl": buy_sl,
+            "entry": buy_entry_p,
+            "tp": buy_tp_p,
+            "sl": buy_sl_p,
             "lot": buy_lot,
-            "risk": get_actual_risk(buy_lot, buy_entry, buy_sl, config.symbol),
+            "risk": get_actual_risk(buy_lot, buy_entry_p, buy_sl_p, config.symbol),
+            "source_tfs": ", ".join(sorted(buy_entry[2])),
         },
         "sell": {
-            "entry": sell_entry,
-            "tp": buy_entry,
-            "sl": sell_sl,
+            "entry": sell_entry_p,
+            "tp": sell_tp_p,
+            "sl": sell_sl_p,
             "lot": sell_lot,
-            "risk": get_actual_risk(sell_lot, sell_entry, sell_sl, config.symbol),
+            "risk": get_actual_risk(sell_lot, sell_entry_p, sell_sl_p, config.symbol),
+            "source_tfs": ", ".join(sorted(sell_entry[2])),
         },
     }, "OK"
 
@@ -285,7 +358,12 @@ def build_settings_text():
         f"💰 <b>الرصيد:</b> <code>${config.custom_balance}</code>\n"
         f"🎯 <b>اللوت:</b> <code>{lot_mode}</code>\n"
         f"📐 <b>حساسية ZigZag:</b> <code>{config.zigzag_threshold}%</code>\n\n"
-        f"💡 استخدم <code>/scan</code> للتحليل أو <code>/balance 1500</code> لتعديل الرصيد."
+        f"🛡️ <b>الفلاتر الأمنية:</b>\n"
+        f"• أدنى مسافة دخول: <code>{MIN_ENTRY_DIST_PCT}%</code>\n"
+        f"• أدنى مسافة ستوب: <code>{MIN_SL_DIST_PCT}%</code>\n"
+        f"• أدنى R:R: <code>1:{MIN_RR:.0f}</code>\n"
+        f"• أقصى لوت: <code>{MAX_LOT}</code>\n\n"
+        f"💡 <code>/scan</code> للتحليل • <code>/balance 1500</code> للرصيد"
     )
 
 def build_settings_keyboard():
@@ -314,7 +392,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "👋 <b>مرحباً بك في بوت ZigZag Semi-Auto</b>\n\n"
         "يحدد البوت القمم والقيعان الثابتة عبر ZigZag ثم يعطيك صفقتين معلقتين "
-        "(Buy Limit + Sell Limit) مع هدف وستوب لكل منهما.\n\n"
+        "(Buy Limit + Sell Limit) مع هدف وستوب مستقل لكل منهما.\n\n"
 
         "📌 <b>الأوامر:</b>\n"
         "/settings — لوحة التحكم\n"
@@ -330,38 +408,40 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "🟢 <b>0.15% — حساس جداً</b>\n"
         "• يلتقط تحركات صغيرة\n"
         "• مناسب للفريمات الصغيرة (M15, M30)\n"
-        "• مستويات كثيرة لكن بعضها ضعيف\n"
-        "• ⚠️ خطر ضرب الستوب بسهولة\n\n"
+        "• ⚠️ مستويات كثيرة، بعضها ضعيف\n\n"
 
         "🟡 <b>0.30% — متوازن (الافتراضي)</b>\n"
         "• توازن بين الكمية والجودة\n"
-        "• مناسب لـ H1 و H4\n"
-        "• الأفضل لمعظم الحالات\n\n"
+        "• مناسب لـ H1 و H4\n\n"
 
         "🟠 <b>0.50% — متحفظ</b>\n"
         "• مستويات قوية فقط\n"
-        "• مناسب لـ H4 و D1\n"
-        "• صفقات أقل لكن أدق\n\n"
+        "• مناسب لـ H4 و D1\n\n"
 
         "🔴 <b>1.00% — صارم جداً</b>\n"
-        "• القمم والقيعان الكبرى فقط\n"
-        "• مناسب لـ D1 فقط\n"
-        "• قد يعطي مستوى واحداً أو لا شيء\n\n"
+        "• القمم والقيعان الكبرى فقط (D1)\n\n"
 
         "━━━━━━━━━━━━━━━━━━━\n"
-        "💡 <b>نصيحة:</b>\n"
-        "• فريمات صغيرة (M15/M30) → استخدم <code>0.15%</code> أو <code>0.30%</code>\n"
-        "• فريمات متوسطة (H1/H4) → استخدم <code>0.30%</code> أو <code>0.50%</code>\n"
-        "• فريمات كبيرة (D1) → استخدم <code>0.50%</code> أو <code>1.00%</code>\n\n"
+        "🛡️ <b>الفلاتر الأمنية المُطبَّقة:</b>\n"
+        "━━━━━━━━━━━━━━━━━━━\n"
+        f"• <b>أدنى مسافة دخول:</b> <code>{MIN_ENTRY_DIST_PCT}%</code> من السعر\n"
+        f"  ↳ يمنع الأوامر الملاصقة للسعر\n"
+        f"• <b>أدنى مسافة ستوب:</b> <code>{MIN_SL_DIST_PCT}%</code> من الدخول\n"
+        f"  ↳ يمنع الستوبات الضيقة (ضجيج)\n"
+        f"• <b>أدنى R:R:</b> <code>1:{MIN_RR:.0f}</code>\n"
+        f"  ↳ TP مستقل لكل صفقة (لا تعارض)\n"
+        f"• <b>أقصى لوت:</b> <code>{MAX_LOT}</code>\n"
+        f"  ↳ يمنع اللوتات الضخمة\n\n"
 
         "━━━━━━━━━━━━━━━━━━━\n"
         "⚠️ <b>آلية العمل:</b>\n"
+        "━━━━━━━━━━━━━━━━━━━\n"
         "1️⃣ اضغط <code>/scan</code> لاستلام الإشارة\n"
-        "2️⃣ ضع كلا الأمرين المعلقين (Buy Limit + Sell Limit)\n"
-        "3️⃣ عند تفعيل أحدهما، ألغِ الآخر <b>فوراً</b> يدوياً\n"
-        "4️⃣ تابع الصفقة حتى ضرب الهدف أو الستوب\n\n"
+        "2️⃣ ضع كلا الأمرين المعلقين\n"
+        "3️⃣ عند تفعيل أحدهما، ألغِ الآخر <b>فوراً</b>\n"
+        "4️⃣ تابع الصفقة حتى TP أو SL\n\n"
 
-        "🎯 ابدأ الآن بـ <code>/settings</code> لضبط الإعدادات.",
+        "🎯 ابدأ الآن بـ <code>/settings</code>.",
         parse_mode="HTML"
     )
 
@@ -408,6 +488,13 @@ async def handle_scan_command(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     buy_dist = abs(buy["entry"] - spot) / spot * 100
     sell_dist = abs(sell["entry"] - spot) / spot * 100
+
+    buy_sl_pct = (buy["entry"] - buy["sl"]) / buy["entry"] * 100
+    sell_sl_pct = (sell["sl"] - sell["entry"]) / sell["entry"] * 100
+
+    buy_tp_pct = (buy["tp"] - buy["entry"]) / buy["entry"] * 100
+    sell_tp_pct = (sell["entry"] - sell["tp"]) / sell["entry"] * 100
+
     tfs = ", ".join(res["tfs"])
 
     text = (
@@ -415,26 +502,29 @@ async def handle_scan_command(update: Update, context: ContextTypes.DEFAULT_TYPE
         f"🪙 <b>الزوج:</b> <code>{res['symbol']}</code>\n"
         f"💵 <b>السعر الحالي:</b> <code>{spot:.{p}f}</code>\n"
         f"📊 <b>الفريمات:</b> <code>{tfs}</code>\n"
-        f"📐 <b>الحساسية:</b> <code>{config.zigzag_threshold}%</code>\n"
+        f"📐 <b>الحساسية:</b> <code>{config.zigzag_threshold}%</code> | "
+        f"<b>R:R:</b> <code>1:{MIN_RR:.0f}</code>\n"
         f"━━━━━━━━━━━━━━━━━━━\n"
         f"🟢 <b>أمر شراء معلق (Buy Limit)</b>\n"
-        f"• الدخول: <code>{buy['entry']:.{p}f}</code> (قاع سابق)\n"
-        f"• الهدف TP: <code>{buy['tp']:.{p}f}</code>\n"
-        f"• الستوب SL: <code>{buy['sl']:.{p}f}</code> (قاع أدنى)\n"
+        f"• الدخول: <code>{buy['entry']:.{p}f}</code>\n"
+        f"• الهدف TP: <code>{buy['tp']:.{p}f}</code> (<code>+{buy_tp_pct:.2f}%</code>)\n"
+        f"• الستوب SL: <code>{buy['sl']:.{p}f}</code> (<code>-{buy_sl_pct:.2f}%</code>)\n"
         f"• اللوت: <code>{buy['lot']}</code>\n"
         f"• المخاطرة: <code>${buy['risk']:.2f}</code>\n"
         f"• بعد السعر: <code>{buy_dist:.2f}%</code>\n"
+        f"• المصدر: <code>{buy['source_tfs']}</code>\n"
         f"━━━━━━━━━━━━━━━━━━━\n"
         f"🔴 <b>أمر بيع معلق (Sell Limit)</b>\n"
-        f"• الدخول: <code>{sell['entry']:.{p}f}</code> (قمة سابقة)\n"
-        f"• الهدف TP: <code>{sell['tp']:.{p}f}</code>\n"
-        f"• الستوب SL: <code>{sell['sl']:.{p}f}</code> (قمة أعلى)\n"
+        f"• الدخول: <code>{sell['entry']:.{p}f}</code>\n"
+        f"• الهدف TP: <code>{sell['tp']:.{p}f}</code> (<code>-{sell_tp_pct:.2f}%</code>)\n"
+        f"• الستوب SL: <code>{sell['sl']:.{p}f}</code> (<code>+{sell_sl_pct:.2f}%</code>)\n"
         f"• اللوت: <code>{sell['lot']}</code>\n"
         f"• المخاطرة: <code>${sell['risk']:.2f}</code>\n"
         f"• بعد السعر: <code>{sell_dist:.2f}%</code>\n"
+        f"• المصدر: <code>{sell['source_tfs']}</code>\n"
         f"━━━━━━━━━━━━━━━━━━━\n"
-        f"⚠️ <b>تذكير:</b> عند تفعيل إحدى الصفقتين، ألغِ الأمر الآخر فوراً "
-        f"وتابع الصفقة يدوياً حتى TP أو SL."
+        f"✅ <b>TP مستقل لكل صفقة (لا تعارض)</b>\n"
+        f"⚠️ عند تفعيل إحداهما، ألغِ الأخرى <b>فوراً</b>."
     )
 
     await msg.edit_text(text, parse_mode="HTML")
@@ -516,7 +606,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         config.awaiting_balance_input = True
         await query.answer()
         await query.message.reply_text(
-            "✏️ اكتب قيمة الرصيد الجديدة في المحادثة:\n(مثال: <code>1500</code> أو <code>250.5</code>)",
+            "✏️ اكتب قيمة الرصيد الجديدة:\n(مثال: <code>1500</code>)",
             parse_mode="HTML"
         )
         return
